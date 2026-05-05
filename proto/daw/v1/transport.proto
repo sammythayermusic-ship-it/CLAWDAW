@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package daw.v1;
+
+import "daw/v1/common.proto";
+
+// ============================================================================
+// Transport: play/stop/record/loop state.
+// ============================================================================
+
+message TransportState {
+  bool playing = 1;
+  bool recording = 2;
+  bool looping = 3;
+  TimePosition position = 4;
+  TimeRange loop_range = 5;     // valid when looping is true
+  double playback_rate = 6;     // 1.0 = normal speed
+  bool metronome_enabled = 7;
+  bool count_in_enabled = 8;
+}

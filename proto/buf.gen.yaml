@@ -1,0 +1,19 @@
+version: v2
+plugins:
+  # C++ for the engine
+  - remote: buf.build/protocolbuffers/cpp
+    out: ../engine/generated
+  - remote: buf.build/grpc/cpp
+    out: ../engine/generated
+
+  # Python for the agent
+  - remote: buf.build/protocolbuffers/python
+    out: ../agent/generated
+  - remote: buf.build/grpc/python
+    out: ../agent/generated
+
+  # TypeScript for the UI
+  - remote: buf.build/bufbuild/es
+    out: ../ui/src/generated
+    opt:
+      - target=ts

@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package daw.v1;
+
+import "daw/v1/common.proto";
+
+// ============================================================================
+// Plugins: scanned info, loaded instances, parameters, and presets.
+// ============================================================================
+
+// A plugin discovered on the system (in the scanner's known list).
+// Identifier strings come from the underlying format (VST3 UID, AU id, etc.)
+// and should be treated as opaque.
+message PluginInfo {
+  string id = 1;
+  string name = 2;
+  string vendor = 3;
+  PluginFormat format = 4;
+  PluginCategory category = 5;
+  bool is_instrument = 6;       // synth / sampler / drum machine
+  string version = 7;
+  string file_path = 8;
+}
+
+// A loaded plugin instance on a specific track at a specific slot.
+message PluginInstance {
+  string id = 1;
+  PluginInfo info = 2;
+  string track_id = 3;
+  uint32 slot = 4;              // position in the plugin chain
+  bool bypassed = 5;
+  string preset_name = 6;       // empty if no preset loaded
+  bool has_custom_ui = 7;       // whether the plugin offers its own editor
+}
+
+message PluginParameter {
+  string id = 1;
+  string name = 2;
+  double value = 3;             // in the plugin's native units
+  double normalized = 4;        // 0.0 - 1.0
+  double min = 5;
+  double max = 6;
+  string unit = 7;              // "dB", "Hz", "ms", "%", ...
+  bool automatable = 8;
+  string display_value = 9;     // formatted for display (e.g., "-6.0 dB")
+}
+
+message PluginPreset {
+  string name = 1;
+  string vendor = 2;
+  bool is_factory = 3;
+  string file_path = 4;         // for user presets
+}

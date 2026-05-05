@@ -1,0 +1,12 @@
+version: v2
+modules:
+  - path: .
+lint:
+  use:
+    - STANDARD
+  except:
+    # Allow snake_case service names if needed; we follow standard otherwise.
+    - PACKAGE_VERSION_SUFFIX  # we use daw.v1, this rule is satisfied
+breaking:
+  use:
+    - FILE

@@ -1,0 +1,96 @@
+syntax = "proto3";
+
+package daw.v1;
+
+import "daw/v1/common.proto";
+import "daw/v1/plugin.proto";
+import "daw/v1/mixer.proto";
+
+// ============================================================================
+// Project and track data model.
+//
+// Project (called "Edit" in Tracktion) is the top-level container. It contains
+// tracks; tracks contain regions (audio or MIDI) and a chain of plugin instances.
+// ============================================================================
+
+message Project {
+  string name = 1;
+  double tempo_bpm = 2;
+  Key key = 3;
+  TimeSignature time_signature = 4;
+  uint32 sample_rate = 5;
+  TimePosition length = 6;
+  repeated TrackSummary tracks = 7;
+  repeated Marker markers = 8;
+  string project_path = 9;  // empty if unsaved
+  uint32 schema_version = 10;
+}
+
+message Marker {
+  TimePosition position = 1;
+  string name = 2;
+  Color color = 3;
+}
+
+// Lightweight track info for list views. Use GetTrack for full details.
+message TrackSummary {
+  string id = 1;
+  string name = 2;
+  TrackType type = 3;
+  Color color = 4;
+  bool muted = 5;
+  bool soloed = 6;
+  uint32 plugin_count = 7;
+  uint32 region_count = 8;
+}
+
+// Full track with plugins, regions, and mixer state.
+message Track {
+  string id = 1;
+  string name = 2;
+  TrackType type = 3;
+  Color color = 4;
+  Mixer mixer = 5;
+  repeated PluginInstance plugins = 6;        // ordered by slot
+  repeated AudioRegion audio_regions = 7;
+  repeated MidiRegion midi_regions = 8;
+  string parent_id = 9;                        // for grouping; empty if top-level
+  bool armed_for_record = 10;
+  string input_source = 11;                    // device input identifier
+}
+
+message AudioRegion {
+  string id = 1;
+  string track_id = 2;
+  string name = 3;
+  TimePosition start = 4;
+  TimePosition length = 5;
+  TimePosition source_offset = 6;       // offset into the source file
+  string audio_file_path = 7;
+  double gain_db = 8;
+  double fade_in_seconds = 9;
+  double fade_out_seconds = 10;
+  bool reversed = 11;
+  double pitch_shift_semitones = 12;
+  double time_stretch_ratio = 13;       // 1.0 = no stretch
+  bool muted = 14;
+}
+
+message MidiRegion {
+  string id = 1;
+  string track_id = 2;
+  string name = 3;
+  TimePosition start = 4;
+  TimePosition length = 5;
+  repeated MidiNote notes = 6;
+  bool muted = 7;
+}
+
+message MidiNote {
+  string id = 1;          // stable per-note id for editing
+  uint32 pitch = 2;       // 0-127
+  TimePosition start = 3; // relative to the region start
+  TimePosition length = 4;
+  uint32 velocity = 5;    // 0-127
+  uint32 channel = 6;     // 0-15
+}

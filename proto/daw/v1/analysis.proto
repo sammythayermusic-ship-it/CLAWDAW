@@ -1,0 +1,71 @@
+syntax = "proto3";
+
+package daw.v1;
+
+import "daw/v1/common.proto";
+
+// ============================================================================
+// Analysis: the "listening layer" — results from ML and DSP analysis.
+// Used both for instrument detection / auto-naming and for mixing decisions.
+// ============================================================================
+
+message TrackAnalysis {
+  InstrumentClassification instrument = 1;
+  Key detected_key = 2;
+  double detected_tempo_bpm = 3;
+  LoudnessReading loudness = 4;
+  double dynamic_range_db = 5;
+  double peak_db = 6;
+  repeated SpectralCharacteristic characteristics = 7;
+  double duration_seconds = 8;
+  bool has_pitched_content = 9;
+  bool is_percussive = 10;
+}
+
+message InstrumentClassification {
+  // Free-form labels from the classifier. We don't enum-constrain these
+  // so the model can evolve without schema migrations. Examples:
+  //   "kick", "snare", "hihat_closed", "tom", "crash", "ride",
+  //   "vocal_lead", "vocal_backing",
+  //   "guitar_acoustic", "guitar_electric_clean", "guitar_electric_distorted",
+  //   "bass_electric", "bass_synth",
+  //   "piano", "rhodes", "organ",
+  //   "synth_lead", "synth_pad", "synth_pluck",
+  //   "strings", "brass", "woodwinds",
+  //   "drums_full_kit", "drum_loop"
+  string label = 1;
+  double confidence = 2;                          // 0.0 - 1.0
+  repeated InstrumentClassification alternatives = 3;
+}
+
+message LoudnessReading {
+  double integrated_lufs = 1;
+  double momentary_lufs_max = 2;
+  double short_term_lufs_max = 3;
+  double true_peak_dbtp = 4;
+}
+
+// Tags like "bright", "dark", "muddy", "boxy", "harsh", "boomy",
+// "thin", "warm". Strength is 0.0 - 1.0.
+message SpectralCharacteristic {
+  string label = 1;
+  double strength = 2;
+}
+
+message SpectrumPoint {
+  double freq_hz = 1;
+  double magnitude_db = 2;
+}
+
+// Streaming audio frames for live listening. The agent subscribes to
+// StreamTrackAudio to get a continuous feed.
+//
+// Format: float32 little-endian, channel-interleaved. Frame boundaries
+// are best-effort but the engine tries to align to plugin processing blocks.
+message AudioFrame {
+  string track_id = 1;
+  uint64 sample_position = 2;     // samples since transport start
+  uint32 channel_count = 3;
+  uint32 sample_rate = 4;
+  bytes interleaved_pcm_f32 = 5;
+}

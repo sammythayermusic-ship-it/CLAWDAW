@@ -1,0 +1,82 @@
+syntax = "proto3";
+
+package daw.v1;
+
+// ============================================================================
+// Common types shared across the DAW engine API.
+//
+// Conventions:
+//   - All IDs are plain strings (UUIDs in practice). We don't wrap them in
+//     message types because the generated Python/TS code becomes verbose
+//     for marginal type-safety gains.
+//   - All time values use TimePosition, which carries both seconds and bars
+//     so consumers can pick whichever is meaningful for their context.
+//   - All mutating RPCs return MutationResult so the agent can undo.
+// ============================================================================
+
+// A point in project time. Both representations are populated by the engine.
+// Callers may set either; if both are set, seconds wins.
+message TimePosition {
+  double seconds = 1;
+  double bars = 2;  // fractional bars from project start
+}
+
+// A range with a start and length.
+message TimeRange {
+  TimePosition start = 1;
+  TimePosition length = 2;
+}
+
+// Packed RGBA, 0xRRGGBBAA.
+message Color {
+  uint32 rgba = 1;
+}
+
+// Musical key (used for project key and detected key from analysis).
+message Key {
+  string root = 1;   // "C", "C#", "Db", "D", ...
+  string scale = 2;  // "major", "minor", "dorian", "harmonic_minor", ...
+}
+
+message TimeSignature {
+  uint32 numerator = 1;
+  uint32 denominator = 2;
+}
+
+enum TrackType {
+  TRACK_TYPE_UNSPECIFIED = 0;
+  TRACK_TYPE_AUDIO = 1;
+  TRACK_TYPE_MIDI = 2;
+  TRACK_TYPE_AUX = 3;
+  TRACK_TYPE_BUS = 4;
+  TRACK_TYPE_FOLDER = 5;
+}
+
+enum PluginFormat {
+  PLUGIN_FORMAT_UNSPECIFIED = 0;
+  PLUGIN_FORMAT_VST3 = 1;
+  PLUGIN_FORMAT_AU = 2;
+  PLUGIN_FORMAT_INTERNAL = 3;  // built-in plugins
+  PLUGIN_FORMAT_CLAP = 4;
+}
+
+enum PluginCategory {
+  PLUGIN_CATEGORY_UNSPECIFIED = 0;
+  PLUGIN_CATEGORY_INSTRUMENT = 1;
+  PLUGIN_CATEGORY_EFFECT = 2;
+  PLUGIN_CATEGORY_EQ = 3;
+  PLUGIN_CATEGORY_DYNAMICS = 4;
+  PLUGIN_CATEGORY_REVERB = 5;
+  PLUGIN_CATEGORY_DELAY = 6;
+  PLUGIN_CATEGORY_MODULATION = 7;
+  PLUGIN_CATEGORY_DISTORTION = 8;
+  PLUGIN_CATEGORY_UTILITY = 9;
+  PLUGIN_CATEGORY_ANALYZER = 10;
+}
+
+// Returned by every mutation RPC. Agents pass commit_id back to Undo
+// to revert this specific change.
+message MutationResult {
+  string commit_id = 1;
+  string description = 2;  // human-readable summary, shown in history UI
+}

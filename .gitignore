@@ -1,0 +1,25 @@
+# macOS
+.DS_Store
+
+# Build outputs
+build/
+DerivedData/
+*.xcuserdata*
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+
+# Vendored Tracktion Engine + JUCE source. Currently extracted from tarballs;
+# will become git submodules when network cooperates. Setup steps live in
+# docs/session-log.md.
+engine/third_party/
+
+# Generated proto/gRPC code. Regenerate with `cd proto && buf generate`
+# (runs all three target plugins; outputs go here).
+engine/generated/
+agent/generated/
+ui/src/generated/

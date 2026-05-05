@@ -1,0 +1,106 @@
+syntax = "proto3";
+
+package daw.v1;
+
+import "daw/v1/common.proto";
+import "daw/v1/transport.proto";
+
+// ============================================================================
+// Events: the engine pushes these to subscribers via the SubscribeEvents RPC.
+// Used by the agent to react to user actions ("auto-name on record_complete")
+// and by the UI to stay in sync.
+// ============================================================================
+
+message Event {
+  string event_id = 1;
+  uint64 timestamp_unix_ms = 2;
+
+  oneof payload {
+    // Project lifecycle
+    ProjectLoaded project_loaded = 5;
+    ProjectSaved project_saved = 6;
+    TempoChanged tempo_changed = 7;
+    KeyChanged key_changed = 8;
+
+    // Tracks
+    TrackAdded track_added = 10;
+    TrackRemoved track_removed = 11;
+    TrackRenamed track_renamed = 12;
+    TrackMixerChanged track_mixer_changed = 13;
+
+    // Regions
+    RegionAdded region_added = 20;
+    RegionRemoved region_removed = 21;
+    RegionMoved region_moved = 22;
+
+    // Plugins
+    PluginAdded plugin_added = 30;
+    PluginRemoved plugin_removed = 31;
+    PluginParamChanged plugin_param_changed = 32;
+    PluginBypassed plugin_bypassed = 33;
+
+    // Recording
+    RecordStarted record_started = 40;
+    RecordComplete record_complete = 41;
+
+    // Transport
+    TransportStateChanged transport_state_changed = 50;
+
+    // Commands (so the agent knows what just happened)
+    CommandApplied command_applied = 60;
+    CommandUndone command_undone = 61;
+  }
+}
+
+message ProjectLoaded { string project_path = 1; }
+message ProjectSaved  { string project_path = 1; }
+message TempoChanged  { double new_tempo_bpm = 1; }
+message KeyChanged    { Key new_key = 1; }
+
+message TrackAdded   { string track_id = 1; }
+message TrackRemoved { string track_id = 1; }
+message TrackRenamed { string track_id = 1; string new_name = 2; }
+message TrackMixerChanged { string track_id = 1; }
+
+message RegionAdded   { string region_id = 1; string track_id = 2; }
+message RegionRemoved { string region_id = 1; }
+message RegionMoved   { string region_id = 1; TimePosition new_start = 2; }
+
+message PluginAdded   { string plugin_instance_id = 1; string track_id = 2; }
+message PluginRemoved { string plugin_instance_id = 1; }
+message PluginParamChanged {
+  string plugin_instance_id = 1;
+  string param_id = 2;
+  double new_value = 3;
+}
+message PluginBypassed {
+  string plugin_instance_id = 1;
+  bool bypassed = 2;
+}
+
+message RecordStarted  { string track_id = 1; }
+message RecordComplete {
+  string track_id = 1;
+  string resulting_region_id = 2;
+}
+
+message TransportStateChanged { TransportState new_state = 1; }
+
+message CommandApplied {
+  string commit_id = 1;
+  string description = 2;
+  string source = 3;            // "user" or "agent"
+}
+
+message CommandUndone {
+  string commit_id = 1;
+  string description = 2;
+}
+
+message EventFilter {
+  // Empty list = subscribe to all event types. Otherwise restrict to these.
+  // Names match the field names in the Event payload oneof.
+  repeated string event_types = 1;
+  // Empty list = all tracks. Otherwise only emit events scoped to these tracks.
+  repeated string track_ids = 2;
+}

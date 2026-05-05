@@ -1,0 +1,351 @@
+syntax = "proto3";
+
+package daw.v1;
+
+import "google/protobuf/empty.proto";
+import "daw/v1/common.proto";
+import "daw/v1/project.proto";
+import "daw/v1/plugin.proto";
+import "daw/v1/transport.proto";
+import "daw/v1/analysis.proto";
+import "daw/v1/events.proto";
+
+// ============================================================================
+// The Engine service. This is the single contract that the UI process and
+// the agent process both speak. Implementations must be safe to call
+// concurrently from multiple clients.
+//
+// Mutating RPCs return MutationResult (with a commit_id usable for Undo).
+// Read RPCs return the relevant data type directly.
+// Streaming RPCs are server-streaming for events, audio, and state diffs.
+// ============================================================================
+
+service Engine {
+  // -------- Project --------
+  rpc GetProject       (google.protobuf.Empty)   returns (Project);
+  rpc NewProject       (NewProjectRequest)       returns (Project);
+  rpc OpenProject      (OpenProjectRequest)      returns (Project);
+  rpc SaveProject      (SaveProjectRequest)      returns (MutationResult);
+  rpc CloseProject     (google.protobuf.Empty)   returns (MutationResult);
+  rpc SetTempo         (SetTempoRequest)         returns (MutationResult);
+  rpc SetKey           (SetKeyRequest)           returns (MutationResult);
+  rpc SetTimeSignature (SetTimeSignatureRequest) returns (MutationResult);
+
+  // -------- Transport --------
+  rpc GetTransportState (google.protobuf.Empty) returns (TransportState);
+  rpc Play              (google.protobuf.Empty) returns (MutationResult);
+  rpc Stop              (google.protobuf.Empty) returns (MutationResult);
+  rpc Record            (RecordRequest)         returns (MutationResult);
+  rpc SetPosition       (SetPositionRequest)    returns (MutationResult);
+  rpc SetLoop           (SetLoopRequest)        returns (MutationResult);
+  rpc ClearLoop         (google.protobuf.Empty) returns (MutationResult);
+
+  // -------- Tracks --------
+  rpc ListTracks     (google.protobuf.Empty)   returns (ListTracksResponse);
+  rpc GetTrack       (GetTrackRequest)         returns (Track);
+  rpc AddTrack       (AddTrackRequest)         returns (AddTrackResponse);
+  rpc DeleteTrack    (DeleteTrackRequest)      returns (MutationResult);
+  rpc RenameTrack    (RenameTrackRequest)      returns (MutationResult);
+  rpc SetTrackColor  (SetTrackColorRequest)    returns (MutationResult);
+  rpc ArmTrack       (ArmTrackRequest)         returns (MutationResult);
+  rpc ReorderTracks  (ReorderTracksRequest)    returns (MutationResult);
+
+  // -------- Mixer --------
+  rpc SetTrackVolume (SetTrackVolumeRequest) returns (MutationResult);
+  rpc SetTrackPan    (SetTrackPanRequest)    returns (MutationResult);
+  rpc SetTrackMute   (SetTrackMuteRequest)   returns (MutationResult);
+  rpc SetTrackSolo   (SetTrackSoloRequest)   returns (MutationResult);
+  rpc AddSend        (AddSendRequest)        returns (AddSendResponse);
+  rpc RemoveSend     (RemoveSendRequest)     returns (MutationResult);
+  rpc SetSendLevel   (SetSendLevelRequest)   returns (MutationResult);
+
+  // -------- Plugins --------
+  rpc ListAvailablePlugins (google.protobuf.Empty)         returns (ListAvailablePluginsResponse);
+  rpc RescanPlugins        (google.protobuf.Empty)         returns (MutationResult);
+  rpc AddPlugin            (AddPluginRequest)              returns (AddPluginResponse);
+  rpc RemovePlugin         (RemovePluginRequest)           returns (MutationResult);
+  rpc ReorderPlugin        (ReorderPluginRequest)          returns (MutationResult);
+  rpc BypassPlugin         (BypassPluginRequest)           returns (MutationResult);
+  rpc GetPluginParameters  (GetPluginParametersRequest)    returns (GetPluginParametersResponse);
+  rpc SetPluginParameter   (SetPluginParameterRequest)     returns (MutationResult);
+  rpc ListPresets          (ListPresetsRequest)            returns (ListPresetsResponse);
+  rpc LoadPreset           (LoadPresetRequest)             returns (MutationResult);
+  rpc SavePreset           (SavePresetRequest)             returns (MutationResult);
+
+  // -------- Regions --------
+  rpc GetAudioRegion    (GetRegionRequest)         returns (AudioRegion);
+  rpc GetMidiRegion     (GetRegionRequest)         returns (MidiRegion);
+  rpc ImportAudioFile   (ImportAudioFileRequest)   returns (ImportAudioFileResponse);
+  rpc MoveRegion        (MoveRegionRequest)        returns (MutationResult);
+  rpc TrimRegion        (TrimRegionRequest)        returns (MutationResult);
+  rpc CutRegion         (CutRegionRequest)         returns (CutRegionResponse);
+  rpc DuplicateRegion   (DuplicateRegionRequest)   returns (DuplicateRegionResponse);
+  rpc DeleteRegion      (DeleteRegionRequest)      returns (MutationResult);
+  rpc SetRegionGain     (SetRegionGainRequest)     returns (MutationResult);
+  rpc SetRegionFades    (SetRegionFadesRequest)    returns (MutationResult);
+
+  // -------- MIDI --------
+  rpc AddMidiNote       (AddMidiNoteRequest)       returns (AddMidiNoteResponse);
+  rpc RemoveMidiNote    (RemoveMidiNoteRequest)    returns (MutationResult);
+  rpc UpdateMidiNote    (UpdateMidiNoteRequest)    returns (MutationResult);
+  rpc QuantizeRegion    (QuantizeRegionRequest)    returns (MutationResult);
+  rpc TransposeRegion   (TransposeRegionRequest)   returns (MutationResult);
+
+  // -------- Analysis (the listening layer) --------
+  rpc AnalyzeTrack     (AnalyzeTrackRequest)    returns (TrackAnalysis);
+  rpc AnalyzeRegion    (AnalyzeRegionRequest)   returns (TrackAnalysis);
+  rpc GetSpectrum      (GetSpectrumRequest)     returns (GetSpectrumResponse);
+  rpc GetLoudness      (GetLoudnessRequest)     returns (LoudnessReading);
+  rpc StreamTrackAudio (StreamTrackAudioRequest) returns (stream AudioFrame);
+
+  // -------- Events --------
+  rpc SubscribeEvents (EventFilter)            returns (stream Event);
+
+  // -------- Undo / history --------
+  rpc Undo       (UndoRequest)            returns (MutationResult);
+  rpc Redo       (google.protobuf.Empty)  returns (MutationResult);
+  rpc GetHistory (GetHistoryRequest)      returns (GetHistoryResponse);
+}
+
+// ============================================================================
+// Request / response messages
+// ============================================================================
+
+// ---- Project ----
+
+message NewProjectRequest {
+  string name = 1;
+  double tempo_bpm = 2;
+  uint32 sample_rate = 3;
+  Key key = 4;
+  TimeSignature time_signature = 5;
+}
+
+message OpenProjectRequest { string project_path = 1; }
+
+message SaveProjectRequest {
+  string project_path = 1;          // empty = save to existing path
+  bool save_as = 2;
+}
+
+message SetTempoRequest         { double tempo_bpm = 1; }
+message SetKeyRequest           { Key key = 1; }
+message SetTimeSignatureRequest { TimeSignature time_signature = 1; }
+
+// ---- Transport ----
+
+message RecordRequest {
+  repeated string track_ids = 1;     // tracks to arm and record
+  bool count_in = 2;
+  bool punch_in = 3;
+  TimeRange punch_range = 4;
+}
+
+message SetPositionRequest { TimePosition position = 1; }
+message SetLoopRequest     { TimeRange range = 1; }
+
+// ---- Tracks ----
+
+message ListTracksResponse { repeated TrackSummary tracks = 1; }
+
+message GetTrackRequest { string track_id = 1; }
+
+message AddTrackRequest {
+  TrackType type = 1;
+  string name = 2;                   // optional
+  Color color = 3;                   // optional
+  uint32 insert_at_index = 4;        // -1 (or omit) appends to end
+}
+
+message AddTrackResponse {
+  string track_id = 1;
+  MutationResult mutation = 2;
+}
+
+message DeleteTrackRequest {
+  string track_id = 1;
+  bool confirm = 2;                  // must be true
+}
+
+message RenameTrackRequest      { string track_id = 1; string name = 2; }
+message SetTrackColorRequest    { string track_id = 1; Color color = 2; }
+message ArmTrackRequest         { string track_id = 1; bool armed = 2; }
+message ReorderTracksRequest    { repeated string track_ids_in_new_order = 1; }
+
+// ---- Mixer ----
+
+message SetTrackVolumeRequest { string track_id = 1; double volume_db = 2; }
+message SetTrackPanRequest    { string track_id = 1; double pan = 2; }
+message SetTrackMuteRequest   { string track_id = 1; bool muted = 2; }
+message SetTrackSoloRequest   { string track_id = 1; bool soloed = 2; }
+
+message AddSendRequest {
+  string track_id = 1;
+  string destination_track_id = 2;
+  double level_db = 3;
+  bool pre_fader = 4;
+}
+message AddSendResponse { string send_id = 1; MutationResult mutation = 2; }
+
+message RemoveSendRequest   { string send_id = 1; }
+message SetSendLevelRequest { string send_id = 1; double level_db = 2; }
+
+// ---- Plugins ----
+
+message ListAvailablePluginsResponse { repeated PluginInfo plugins = 1; }
+
+message AddPluginRequest {
+  string track_id = 1;
+  string plugin_id = 2;              // from PluginInfo.id
+  uint32 slot = 3;                   // omit/-1 = append
+}
+message AddPluginResponse {
+  string plugin_instance_id = 1;
+  MutationResult mutation = 2;
+}
+
+message RemovePluginRequest  { string plugin_instance_id = 1; bool confirm = 2; }
+message ReorderPluginRequest { string plugin_instance_id = 1; uint32 new_slot = 2; }
+message BypassPluginRequest  { string plugin_instance_id = 1; bool bypassed = 2; }
+
+message GetPluginParametersRequest  { string plugin_instance_id = 1; }
+message GetPluginParametersResponse { repeated PluginParameter parameters = 1; }
+
+message SetPluginParameterRequest {
+  string plugin_instance_id = 1;
+  string param_id = 2;
+  oneof value {
+    double native_value = 3;         // in plugin units
+    double normalized = 4;           // 0.0 - 1.0
+  }
+}
+
+message ListPresetsRequest  { string plugin_instance_id = 1; }
+message ListPresetsResponse { repeated PluginPreset presets = 1; }
+
+message LoadPresetRequest { string plugin_instance_id = 1; string preset_name = 2; }
+message SavePresetRequest { string plugin_instance_id = 1; string preset_name = 2; }
+
+// ---- Regions ----
+
+message GetRegionRequest { string region_id = 1; }
+
+message ImportAudioFileRequest {
+  string track_id = 1;
+  string audio_file_path = 2;
+  TimePosition start = 3;
+}
+message ImportAudioFileResponse {
+  string region_id = 1;
+  MutationResult mutation = 2;
+}
+
+message MoveRegionRequest { string region_id = 1; TimePosition new_start = 2; }
+message TrimRegionRequest {
+  string region_id = 1;
+  TimePosition new_start = 2;
+  TimePosition new_length = 3;
+}
+
+message CutRegionRequest  { string region_id = 1; TimePosition at = 2; }
+message CutRegionResponse {
+  string left_region_id = 1;
+  string right_region_id = 2;
+  MutationResult mutation = 3;
+}
+
+message DuplicateRegionRequest  { string region_id = 1; TimePosition new_start = 2; }
+message DuplicateRegionResponse { string new_region_id = 1; MutationResult mutation = 2; }
+
+message DeleteRegionRequest { string region_id = 1; bool confirm = 2; }
+
+message SetRegionGainRequest { string region_id = 1; double gain_db = 2; }
+message SetRegionFadesRequest {
+  string region_id = 1;
+  double fade_in_seconds = 2;
+  double fade_out_seconds = 3;
+}
+
+// ---- MIDI ----
+
+message AddMidiNoteRequest {
+  string region_id = 1;
+  uint32 pitch = 2;
+  TimePosition start = 3;
+  TimePosition length = 4;
+  uint32 velocity = 5;
+  uint32 channel = 6;
+}
+message AddMidiNoteResponse { string note_id = 1; MutationResult mutation = 2; }
+
+message RemoveMidiNoteRequest { string region_id = 1; string note_id = 2; }
+
+message UpdateMidiNoteRequest {
+  string region_id = 1;
+  string note_id = 2;
+  uint32 pitch = 3;
+  TimePosition start = 4;
+  TimePosition length = 5;
+  uint32 velocity = 6;
+}
+
+message QuantizeRegionRequest {
+  string region_id = 1;
+  string grid = 2;                  // "1/4", "1/8", "1/16", "1/16T", ...
+  double swing = 3;                 // 0.0 - 1.0
+  double strength = 4;              // 0.0 - 1.0
+}
+
+message TransposeRegionRequest { string region_id = 1; int32 semitones = 2; }
+
+// ---- Analysis ----
+
+message AnalyzeTrackRequest  {
+  string track_id = 1;
+  bool include_alternatives = 2;
+}
+message AnalyzeRegionRequest {
+  string region_id = 1;
+  bool include_alternatives = 2;
+}
+
+message GetSpectrumRequest {
+  string track_id = 1;
+  TimePosition at = 2;
+  uint32 fft_size = 3;              // default 2048
+}
+message GetSpectrumResponse { repeated SpectrumPoint points = 1; }
+
+message GetLoudnessRequest {
+  oneof target {
+    string track_id = 1;
+    string region_id = 2;
+  }
+  string mode = 3;                  // "integrated" | "momentary" | "short_term"
+}
+
+message StreamTrackAudioRequest {
+  string track_id = 1;
+  bool post_fader = 2;              // true = after mixer/plugins; false = pre
+  uint32 max_frames_per_second = 3; // 0 = unlimited
+}
+
+// ---- Undo / history ----
+
+message UndoRequest {
+  // If empty, undo the most recent commit. If set, undo this specific commit
+  // (and any commits after it that depend on it).
+  string commit_id = 1;
+}
+
+message GetHistoryRequest { uint32 limit = 1; }
+message GetHistoryResponse {
+  repeated HistoryEntry entries = 1;
+}
+message HistoryEntry {
+  string commit_id = 1;
+  string description = 2;
+  uint64 timestamp_unix_ms = 3;
+  string source = 4;                // "user" or "agent"
+  bool can_undo = 5;
+}

@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package daw.v1;
+
+import "daw/v1/common.proto";
+
+// ============================================================================
+// Mixer state and automation.
+// ============================================================================
+
+message Mixer {
+  double volume_db = 1;
+  double pan = 2;                 // -1.0 (left) to 1.0 (right)
+  bool muted = 3;
+  bool soloed = 4;
+  repeated Send sends = 5;
+  string output_track_id = 6;     // routing destination; empty = main output
+  double peak_db = 7;             // most recent peak meter (read-only)
+  double rms_db = 8;              // most recent RMS meter (read-only)
+}
+
+message Send {
+  string id = 1;
+  string destination_track_id = 2;
+  double level_db = 3;
+  bool pre_fader = 4;
+  bool muted = 5;
+}
+
+// Automation lanes target a single parameter. The target oneof identifies what.
+message AutomationLane {
+  oneof target {
+    TrackVolumeTarget track_volume = 1;
+    TrackPanTarget track_pan = 2;
+    PluginParamTarget plugin_param = 3;
+    SendLevelTarget send_level = 4;
+  }
+  repeated AutomationPoint points = 10;
+  bool enabled = 11;
+}
+
+message TrackVolumeTarget { string track_id = 1; }
+message TrackPanTarget    { string track_id = 1; }
+message SendLevelTarget   { string send_id = 1; }
+message PluginParamTarget {
+  string plugin_instance_id = 1;
+  string param_id = 2;
+}
+
+message AutomationPoint {
+  TimePosition time = 1;
+  double value = 2;               // in the parameter's native units
+  AutomationCurve curve = 3;      // shape from this point to the next
+}
+
+enum AutomationCurve {
+  AUTOMATION_CURVE_UNSPECIFIED = 0;
+  AUTOMATION_CURVE_LINEAR = 1;
+  AUTOMATION_CURVE_HOLD = 2;       // step
+  AUTOMATION_CURVE_BEZIER = 3;
+  AUTOMATION_CURVE_EXPONENTIAL = 4;
+}
