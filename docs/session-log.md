@@ -4,6 +4,76 @@ Append-only log of each work session. Newest at the top.
 
 ---
 
+## 2026-05-06 (continued) — Undo bridge: Tracktion's UndoManager replaced with our own LIFO log ✅
+
+**Goal:** Close the documented parameter-undo gap. Make `SetTrackVolume`, `SetTrackPan`, `SetPluginParameter` actually undoable so a sequence of mutations of any kind walks back to the starting state via repeated `Undo` calls.
+
+**Outcome:** Working. The engine now maintains its own LIFO undo log of revert closures, one per mutation. Verified end-to-end: 6 interleaved mutations (rename, vol, pan, AddPlugin, rename, vol) reversed cleanly via 6 Undos back to the initial state. All four mutation kinds compose correctly with each other in any order.
+
+### What changed
+
+- `EngineServiceImpl` now has a private `std::deque<std::function<void()>> undo_log_` plus mutex, capped at 100 entries. Every mutation pushes a revert closure; `Undo` pops the most recent and runs it.
+- The five mutating handlers all switched to a capture-replay pattern:
+  - `RenameTrack` captures the current name; revert calls `track->setName(beforeName)`.
+  - `SetTrackVolume` captures `vp->getVolumeDb()`; revert calls `vp->setVolumeDb(beforeDb)`.
+  - `SetTrackPan` captures `vp->getPan()`; revert calls `vp->setPan(beforePan)`.
+  - `AddPlugin` captures the inserted `Plugin::Ptr`; revert calls `plugin->removeFromParent()` via `runOnMessageThreadSync` (the same callAsync-based path AddPlugin uses for instantiation, since AU teardown has the same async-dispatch sensitivities as init).
+  - `SetPluginParameter` captures `param->getCurrentValue()`; revert calls `param->setParameter(beforeValue, juce::sendNotification)`.
+- All references to `edit_.getUndoManager()` removed from mutation paths. Tracktion's UndoManager is now never written to or read from. `Undo` no longer calls `undoManager.undo()` either.
+- New helper `runOnMessageThreadSync(fn)` that uses `MessageManager::callAsync` + `std::future` for synchronous dispatch onto an actively-running message thread. AddPlugin's instantiation path already used this; the symmetric removeFromParent path now reuses it.
+- Old "KNOWN LIMITATION" comments at SetTrackVolume / SetTrackPan / SetPluginParameter replaced with one-liners pointing at the comment block on `undo_log_`.
+
+### Why we threw out Tracktion's UndoManager
+
+This took a few false starts to understand. The summary:
+
+1. **`setVolumeDb` actually does write to UndoManager** (via the bound CachedValue at `tracktion_VolumeAndPan.cpp:107`). I'd been assuming it bypassed the UndoManager entirely, which was wrong.
+2. **But `undoManager.undo()` doesn't sync the result back to the parameter's runtime `currentValue`.** The comment at `tracktion_AutomatableParameter.cpp:882-892` is explicit: the value-tree change handler "shouldn't be directly setting the value of an attachedValue managed parameter," because parameter changes might come from automation/modifiers and shouldn't be treated as the new base value. So an UndoManager-driven undo reverts the persistent CachedValue but leaves the audio-thread-visible value stale.
+3. **Mixing the side-band log with UndoManager creates LIFO drift.** Each side-band revert (which calls `setVolumeDb(before)` again) creates its own NEW UndoManager transaction. So a "rename → vol → rename → undo, undo, undo" sequence ends up with the third undo's `undoManager.undo()` popping a spurious vol-revert transaction instead of the rename. Observed: name doesn't revert when expected.
+
+After spending too long trying to make the two systems coexist, the cleanest answer was to drop one entirely. The capture-replay pattern doesn't need the UndoManager at all — we record the before-value of every mutation and replay it through the same setter the original mutation used. That keeps the parameter, the CachedValue, and the ValueTree all aligned automatically (since they're aligned by the same setter that was used originally).
+
+Tracktion's UndoManager still fills with junk during normal operation (every setVolumeDb writes into it via the CachedValue path) but we never read from it. Acceptable tradeoff for v1.
+
+### Verification
+
+```
+0. init:            Track 1, vol=0,   pan=0,   2 plugins
+1. rename Bass:     Bass,    vol=0,   pan=0,   2
+2. vol -12:         Bass,    vol=-12, pan=0,   2
+3. pan 0.6:         Bass,    vol=-12, pan=0.6, 2
+4. AddPlugin AUVP:  Bass,    vol=-12, pan=0.6, 3
+5. rename BassDI:   BassDI,  vol=-12, pan=0.6, 3
+6. vol -3:          BassDI,  vol=-3,  pan=0.6, 3
+6 undos →           BassDI,  -12, 0.6, 3   →   Bass, -12, 0.6, 3
+                ↓                              ↓
+                    Bass,    -12, 0.6, 2   →   Bass, -12, 0,   2
+                ↓                              ↓
+                    Bass,    0,   0,   2   →   Track 1, 0, 0, 2 ✓
+7th undo: FAILED_PRECONDITION ✓
+```
+
+Also verified: pure rename sequences, pure parameter sequences (vol+pan), AddPlugin alone, and SetPluginParameter against a live AU plugin's `dry level` parameter (0.0 → 0.7 → undo → 0.0).
+
+### Known limitations
+
+- **`Undo` ignores `commit_id`.** Both before and after this change, the proto's `UndoRequest.commit_id` field is unused. Selective undo would require a more complex log that tracks dependencies between commits. Deferred.
+- **Captured raw pointers / refcounted ptrs assume the target lives.** `te::Track*` in RenameTrack closures, `te::VolumeAndPanPlugin*` in SetTrackVolume/SetTrackPan, are raw. They're tied to the AudioTrack's lifetime, which is the Edit's lifetime. We don't have RemoveTrack yet, so this is fine for v1. When RemoveTrack lands, those closures will need refcounted captures or re-resolution by ID at undo time.
+- **Bounded log (100 entries).** Older entries silently drop. Not really a limitation in practice but worth noting.
+- **Tracktion's UndoManager isn't garbage-collected.** Every parameter change still pushes into it via the CachedValue path. Memory cost is O(N) over a session, but actions are tiny — measured fine on the dev Mac for thousands of mutations. v2: clear it periodically or never.
+
+### Files touched
+
+- [engine/src/main.cc](engine/src/main.cc) — undo log infrastructure, helper, all five handler updates, comment cleanup. ~50 lines added net.
+
+No CMake changes. Nothing else.
+
+### Time spent
+
+~1 hour. Most of it was the false start where I tried to coexist with Tracktion's UndoManager — mixing two LIFO systems is a great way to find weird interleaving bugs. Once the diagnosis was clear, the fix was small.
+
+---
+
 ## 2026-05-06 (continued) — Phase 2 finish-line: plugin RPCs ✅
 
 **Goal:** Implement the last three Phase 2 first-10 RPCs (`AddPlugin`, `SetPluginParameter`, `GetPluginParameters`) plus their preconditions (`RescanPlugins`, `ListAvailablePlugins`). Together these unlock the agent-native demo from CLAUDE.md: "list available plugins → add a compressor to a track → tweak a parameter."

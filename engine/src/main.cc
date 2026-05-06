@@ -1,8 +1,11 @@
 #include <atomic>
 #include <csignal>
+#include <deque>
+#include <functional>
 #include <future>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -91,6 +94,25 @@ template <typename Fn>
 auto runOnMessageThread(Fn&& fn) -> decltype(fn()) {
     const juce::MessageManagerLock mml;
     return fn();
+}
+
+// Like runOnMessageThread, but dispatches via callAsync + std::future instead
+// of holding MessageManagerLock. AU plugin instantiation/destruction needs
+// the message thread to be ACTIVELY dispatching (not paused), so anything
+// that touches plugin lifecycle must use this variant. Plain ValueTree
+// mutations should keep using runOnMessageThread — it's cheaper and works.
+inline void runOnMessageThreadSync(std::function<void()> fn) {
+    if (juce::MessageManager::getInstance()->isThisTheMessageThread()) {
+        fn();
+        return;
+    }
+    std::promise<void> done;
+    auto fut = done.get_future();
+    juce::MessageManager::callAsync([fn = std::move(fn), &done]() mutable {
+        fn();
+        done.set_value();
+    });
+    fut.wait();
 }
 
 void fillMutationResult(daw::v1::MutationResult* dst, std::string description) {
@@ -300,9 +322,14 @@ public:
                                 "Track not found: " + request->track_id());
         }
 
-        runOnMessageThread([&] {
-            edit_.getUndoManager().beginNewTransaction("Rename track");
-            track->setName(juce::String(request->name()));
+        // Capture before-name and write the new one. We deliberately do NOT
+        // use Tracktion's UndoManager — see the comment on undo_log_ for why
+        // we maintain our own LIFO instead.
+        const std::string beforeName = track->getName().toStdString();
+        runOnMessageThread([&] { track->setName(juce::String(request->name())); });
+
+        pushUndo([track, beforeName] {
+            runOnMessageThread([&] { track->setName(juce::String(beforeName)); });
         });
 
         fillMutationResult(response, "Renamed track to \"" + request->name() + "\"");
@@ -328,26 +355,15 @@ public:
                                 "Track has no volume plugin");
         }
 
-        // KNOWN LIMITATION: volume changes are NOT undoable in v1.
-        //
-        // Tracktion's setVolumeDb routes through an AutomatableParameter,
-        // which intentionally bypasses the UndoManager (parameter changes
-        // happen at audio rate, so undoing every parameter touch would
-        // explode the undo stack). We tried writing directly to the
-        // underlying ValueTree property with the UndoManager attached, but
-        // AutomatableParameter::valueTreePropertyChanged explicitly does
-        // NOT propagate ValueTree changes to the parameter's currentValue —
-        // the comment in tracktion_AutomatableParameter.cpp:883-884 is
-        // explicit: "You shouldn't be directly setting the value of an
-        // attachedValue managed parameter".
-        //
-        // The proper fix is a side-band undo bridge for parameter changes
-        // (record before/after pairs in our own commit_id map). Tracked as
-        // a Phase 2 follow-up.
+        // Capture before-value, run the setter, push a replay closure into
+        // the side-band undo log. See the comment on undo_log_ for why we
+        // don't go through Tracktion's UndoManager.
+        const float beforeDb = vp->getVolumeDb();
         const float dbValue = (float) request->volume_db();
-        runOnMessageThread([&] {
-            edit_.getUndoManager().beginNewTransaction("Set track volume");
-            vp->setVolumeDb(dbValue);
+        runOnMessageThread([&] { vp->setVolumeDb(dbValue); });
+
+        pushUndo([vp, beforeDb] {
+            runOnMessageThread([&] { vp->setVolumeDb(beforeDb); });
         });
 
         fillMutationResult(response, "Set track volume to " + std::to_string(dbValue) + " dB");
@@ -379,11 +395,12 @@ public:
                                 "Pan must be in [-1.0, 1.0]");
         }
 
-        // Same KNOWN LIMITATION as SetTrackVolume — pan changes are not
-        // undoable in v1. See the comment there for the gory detail.
-        runOnMessageThread([&] {
-            edit_.getUndoManager().beginNewTransaction("Set track pan");
-            vp->setPan(panValue);
+        // Same capture-replay pattern as SetTrackVolume.
+        const float beforePan = vp->getPan();
+        runOnMessageThread([&] { vp->setPan(panValue); });
+
+        pushUndo([vp, beforePan] {
+            runOnMessageThread([&] { vp->setPan(beforePan); });
         });
 
         fillMutationResult(response, "Set track pan to " + std::to_string(panValue));
@@ -393,19 +410,21 @@ public:
     grpc::Status Undo(grpc::ServerContext* /*context*/,
                       const daw::v1::UndoRequest* /*request*/,
                       daw::v1::MutationResult* response) override {
-        // commit_id-targeted undo is in the proto contract, but Tracktion's
-        // UndoManager only undoes the most recent transaction in order. For
-        // v1 we ignore commit_id and undo the last transaction; if the agent
-        // wants finer control we'll need to layer our own bookkeeping.
-        bool ok = false;
-        runOnMessageThread([&] {
-            ok = edit_.getUndoManager().undo();
-        });
-
-        if (! ok) {
-            return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
-                                "Nothing to undo");
+        // commit_id-targeted undo is in the proto contract but not supported
+        // yet — both Tracktion's UndoManager and our side-band log are LIFO.
+        // Selective undo would require separating dependent commits, which
+        // the agent doesn't need today. v2 fodder.
+        std::function<void()> revert;
+        {
+            std::lock_guard<std::mutex> lock(undo_log_mutex_);
+            if (undo_log_.empty()) {
+                return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
+                                    "Nothing to undo");
+            }
+            revert = std::move(undo_log_.back());
+            undo_log_.pop_back();
         }
+        revert();
 
         fillMutationResult(response, "Undo");
         return grpc::Status::OK;
@@ -537,6 +556,13 @@ public:
                                 "Plugin instantiation failed");
         }
 
+        // Capture the plugin we just inserted; revert removes it from its
+        // parent. Same callAsync-based dispatch as the instantiation —
+        // AU teardown has the same async-dispatch sensitivities as init.
+        pushUndo([plugin] {
+            runOnMessageThreadSync([plugin] { plugin->removeFromParent(); });
+        });
+
         response->set_plugin_instance_id(plugin->itemID.toString().toStdString());
         fillMutationResult(response->mutable_mutation(),
                            "Added plugin: " + plugin->getName().toStdString());
@@ -577,28 +603,77 @@ public:
                                 "Param not found: " + request->param_id());
         }
 
-        // Same parameter-undo gap as SetTrackVolume — see the long comment
-        // there. For this RPC, the change is applied but is not undoable
-        // through the standard Undo RPC.
+        // Same capture-replay pattern as SetTrackVolume. We always store
+        // the native value (setParameter takes native) regardless of which
+        // oneof case the request used.
+        const float beforeValue = param->getCurrentValue();
+        bool valueWasSet = false;
         runOnMessageThread([&] {
-            edit_.getUndoManager().beginNewTransaction("Set plugin param");
             switch (request->value_case()) {
                 case daw::v1::SetPluginParameterRequest::kNativeValue:
                     param->setParameter((float) request->native_value(), juce::sendNotification);
+                    valueWasSet = true;
                     break;
                 case daw::v1::SetPluginParameterRequest::kNormalized:
                     param->setNormalisedParameter((float) request->normalized(), juce::sendNotification);
+                    valueWasSet = true;
                     break;
                 default:
                     break;  // neither set; leave param alone.
             }
         });
 
+        // Only log an undo if we actually changed something — otherwise we'd
+        // pollute the stack with a no-op revert.
+        if (valueWasSet) {
+            pushUndo([param, beforeValue] {
+                runOnMessageThread([&] {
+                    param->setParameter(beforeValue, juce::sendNotification);
+                });
+            });
+        }
+
         fillMutationResult(response, "Set " + param->getParameterName().toStdString());
         return grpc::Status::OK;
     }
 
 private:
+    // Undo log. Each mutation pushes a revert closure here in execution
+    // order; Undo pops the most recent and runs it.
+    //
+    // We deliberately do NOT use Tracktion's UndoManager. Two reasons:
+    //   1. AutomatableParameter::valueTreePropertyChanged explicitly does
+    //      not propagate ValueTree-undo changes back to the parameter's
+    //      runtime currentValue (the audio-thread value), so an
+    //      undoManager.undo() of a volume change reverts the persistent
+    //      CachedValue but leaves the audio path running with the old
+    //      value. Documented at tracktion_AutomatableParameter.cpp:882-892.
+    //   2. setVolumeDb / setPan / setParameter still write through the
+    //      UndoManager via the bound CachedValue, so each side-band revert
+    //      we'd record creates a NEW UndoManager transaction. Mixing the
+    //      two systems leaves the UndoManager stack polluted in ways that
+    //      break interleaved rename + param sequences (the rename revert's
+    //      undo() pops a spurious vol-revert transaction instead).
+    //
+    // So: capture the before-state of every mutation explicitly, and let
+    // Tracktion's UndoManager fill up unused. Undo replays the captured
+    // before-state through the same setter the original mutation used,
+    // which keeps the parameter, CachedValue, and ValueTree all aligned.
+    //
+    // Bounded so a long-running session doesn't grow unbounded; older
+    // entries are dropped (and become un-undoable). 100 is plenty for v1.
+    static constexpr size_t kMaxUndoEntries = 100;
+    std::mutex undo_log_mutex_;
+    std::deque<std::function<void()>> undo_log_;
+
+    void pushUndo(std::function<void()> revert) {
+        std::lock_guard<std::mutex> lock(undo_log_mutex_);
+        undo_log_.push_back(std::move(revert));
+        while (undo_log_.size() > kMaxUndoEntries) {
+            undo_log_.pop_front();
+        }
+    }
+
     te::Engine& engine_;
     te::Edit& edit_;
 };
