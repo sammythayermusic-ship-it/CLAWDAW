@@ -4,6 +4,75 @@ Append-only log of each work session. Newest at the top.
 
 ---
 
+## 2026-05-06 — Phase 2 second cut: GetProject, GetTrack, three mutations, Undo ✅
+
+**Goal:** Pick up Phase 2 from the last session's first cut. Implement the remaining read RPCs (`GetProject`, `GetTrack`), make the architectural decision about JUCE message-thread marshalling, then ship the first mutating RPCs (`RenameTrack`, `SetTrackVolume`, `SetTrackPan`) and `Undo`. Leave the plugin RPCs (`AddPlugin`, `SetPluginParameter`, `GetPluginParameters`) for the next session — those need the Tracktion plugin scanner first.
+
+**Outcome:** 6 of the remaining 9 first-10 RPCs are working end-to-end. `clawdaw_engine` now serves: `ListTracks`, `GetProject`, `GetTrack` (reads), `RenameTrack`, `SetTrackVolume`, `SetTrackPan` (mutations), `Undo`. Verified all paths against a real Tracktion `Edit` via `grpcurl`. Engine shuts down cleanly on SIGINT/SIGTERM. Plugin RPCs and the deeper undo problem are queued for next session.
+
+### Architectural decisions
+
+**JUCE message-thread marshalling (the choice the last session deferred).** Tracktion's `ValueTree` mutations need either to run on the message thread or hold the `MessageManagerLock`. Two patterns we considered:
+- Pattern A: gRPC handlers post work to a dedicated message-thread loop and block on a future. Clean, but wraps every mutation in plumbing.
+- Pattern B (chosen): gRPC handlers acquire `juce::MessageManagerLock` inline. Re-entrant and well-supported by JUCE.
+
+Pattern B requires that *some* thread is actually running the JUCE dispatch loop, otherwise the lock posts a message that never gets processed and we deadlock. We tried `MessageManager::runDispatchLoop()` on the main thread — it returns immediately on a headless macOS console process because there's no Cocoa run loop to drive it. The fix Tracktion's own `TestRunner` example uses (and what we adopted): pump the queue manually with `MessageManager::runDispatchLoopUntil(50)` in a loop on the main thread, gated by `JUCE_MODAL_LOOPS_PERMITTED=1`. gRPC's `server->Wait()` runs on a worker thread.
+
+Concretely in [engine/src/main.cc](engine/src/main.cc):
+- main thread: `ScopedJuceInitialiser_GUI` → `te::Engine` → `te::Edit` → start gRPC on a thread → manual JUCE pump loop until SIGINT.
+- gRPC handler thread: hold `MessageManagerLock` for the duration of the mutation.
+- Helper [`runOnMessageThread`](engine/src/main.cc:79-83) wraps the lock acquisition.
+
+**Undo wiring.** Each mutation calls `edit_.getUndoManager().beginNewTransaction("description")` before the mutation. `Undo` calls `undoManager.undo()`. Per-commit-id selective undo (in the proto contract) isn't supported — the proto's `commit_id` field is currently ignored and Tracktion's `UndoManager` only supports sequential undo. v2 if/when we need it.
+
+### What was built
+
+- [engine/src/main.cc](engine/src/main.cc): rewrote with helpers (`findTrackById`, `setProtoTime`, `setProtoDuration`, `protoColorRgba`, `fillTrackSummary`, `fillMutationResult`, `runOnMessageThread`) plus seven RPC handlers in `EngineServiceImpl`. Main now does proper JUCE init + pump loop + signal handling.
+- [engine/CMakeLists.txt](engine/CMakeLists.txt): added `target_compile_definitions(clawdaw_engine PRIVATE JUCE_MODAL_LOOPS_PERMITTED=1)` so `runDispatchLoopUntil` is reachable. Same flag Tracktion's TestRunner uses.
+- Verified end-to-end via `grpcurl`:
+  - `GetProject` returns tempo (120 BPM), time signature (4/4), sample rate (48000), edit length (0s), all 7 tracks (`fillTrackSummary` shared with `ListTracks`), markers (none in default Edit), schema_version 1. Key field stays empty — Tracktion stores chord progressions instead of a single project key, so we'll either model that as a v2 field or punt indefinitely.
+  - `GetTrack` returns track id, name, type, color, mixer state (volume_db, pan, mute, solo), plugin chain (the volume + level-meter plugins Tracktion auto-creates), and partitions clips into `audio_regions` / `midi_regions`. Tested against Track 1.
+  - Mutations: rename, volume, pan all visibly land on the Edit and are observable via subsequent `GetTrack`.
+  - `Undo` reverts the rename. Volume/pan don't undo — see "what didn't" below.
+  - SIGINT/SIGTERM cleanly stop the dispatch pump → `server->Shutdown()` → process exits 0.
+
+### What didn't (and what we did instead)
+
+- **Volume/pan changes don't go through the UndoManager.** This is an intentional Tracktion design choice. `VolumeAndPanPlugin::setVolumeDb` calls `volParam->setParameter(...)`, which routes through `AutomatableParameter` and ultimately writes back to the underlying `CachedValue` with a literal `nullptr` UndoManager (line 563 of `tracktion_AutomatableParameter.cpp`). So even though we wrap the call in `beginNewTransaction("Set track volume")`, the transaction is empty and `Undo` finds nothing to revert.
+  - We tried writing directly to `vp->state.setProperty(IDs::volume, faderPos, &um)` — this DID land in the undo stack, but `AutomatableParameter::valueTreePropertyChanged` (line 872 onwards) explicitly does *not* propagate the change to the parameter's `currentValue`, with a comment at line 883-884 reading `"You shouldn't be directly setting the value of an attachedValue managed parameter."` So that approach silently breaks the audio-thread side: `getVolumeDb()` reads from `currentValue`, which never updated, and the audio path also still sees the old value.
+  - The proper fix is a side-band undo bridge that records before/after pairs in our own `commit_id` map and replays them on `Undo`. Tracked as a follow-up below.
+  - For now, [engine/src/main.cc:240-256](engine/src/main.cc) carries a long comment explaining the gap so a future maintainer doesn't repeat the experiment.
+- **`runDispatchLoop()` returns immediately in a console process** on macOS. Switched to `runDispatchLoopUntil(50)` in a loop, as already covered above.
+- **`tracktion::TimePosition` lives in `tracktion::`, not `tracktion::engine::`.** First compile failed because we'd written `te::TimePosition`. Added a `namespace tc = tracktion;` alias.
+- **`Undo` returns OK even when there's logically nothing to undo.** Tracktion implicitly creates transactions during Edit setup (`createSingleTrackEdit`, `ensureNumberOfAudioTracks`), and our `beginNewTransaction` calls also leave behind empty transactions for parameter mutations. `juce::UndoManager::undo()` returns true for popping an empty transaction, so we report success. Acceptable for v1; can be tightened up alongside the proper undo bridge.
+
+### Repo state at end of session
+
+- [engine/src/main.cc](engine/src/main.cc): ~370 lines, eight handlers + helpers + main. Single file is fine for now; refactor when it grows past one screen worth of dispatch logic.
+- [engine/CMakeLists.txt](engine/CMakeLists.txt): one-line addition for `JUCE_MODAL_LOOPS_PERMITTED`.
+- Worktree linked `engine/third_party/` and `engine/generated/` into the main repo's copies (both gitignored, both already built). No file duplication.
+- Clean build at [engine/build/clawdaw_engine](engine/build/clawdaw_engine), warns only about deployment-target mismatches between Tracktion (macOS-11) and Homebrew bottles (macOS-26) — same warnings as last session, still ignorable.
+
+### What's next (Phase 2 finish-line)
+
+1. **Plugin RPCs** — `AddPlugin`, `SetPluginParameter`, `GetPluginParameters`, plus `RescanPlugins` and `ListAvailablePlugins` to support them. These all require Tracktion's plugin scanner. Tracktion's `PluginManager` (in `engine.getPluginManager()`) handles VST3/AU scanning. First step is firing a scan and listing what gets discovered on this machine. `RescanPlugins` is probably an explicit warm-up RPC; `ListAvailablePlugins` returns the cached results.
+2. **Side-band undo bridge for parameter mutations.** Build a small `ParameterUndoLog` that, when a mutation goes through our handler, records `{commit_id, parameter_handle, before_value, after_value}`. `Undo` consults this log first; if the most recent commit_id is in our log, replay the inverse via `setVolumeDb(before)` etc. Otherwise fall through to `UndoManager::undo()`. Lets us actually fulfill the proto contract of "MutationResult.commit_id can be undone."
+3. **Phase 3 (UI)** can start in parallel once plugin RPCs land — the React/Tauri side doesn't need the agent.
+
+### Open questions / housekeeping carried forward
+
+- **Track type for system tracks (Arranger, Chord, Marker, Tempo).** Still come back as `TRACK_TYPE_UNSPECIFIED` from `ListTracks`/`GetProject`. Last session noted this. Lower priority than plugin work.
+- **Audio vs MIDI distinction at the track level.** `isAudioTrack()` is true for both. Resolved per-clip in `GetTrack` via `Clip::isMidi()`, but `TrackSummary.type` and `Track.type` still report `TRACK_TYPE_AUDIO` for any clip-bearing track. Inferring track-level kind from clip contents (or treating it as a hint) is a v2 question.
+- **Deployment target warnings.** Defer until we ship anything.
+- **Submodules vs tarballs.** Same as last session.
+- **Initial commit was made last session (`b44c557`)** — we now have actual code changes to commit if/when ready. The session ended in a clean state: repo is one commit ahead with `engine/src/main.cc` and `engine/CMakeLists.txt` modified, and `docs/session-log.md` updated. Sammy can commit when ready.
+
+### Time spent
+
+~2 hours. Most of it was tracing Tracktion's parameter undo behavior — the volume/pan undo gap took 30+ minutes to characterize correctly because the symptoms (visible on each test) led us into a wrong fix before reading the warning comment in `AutomatableParameter::valueTreePropertyChanged`. Lesson recorded in feedback memory: when Tracktion's setter and value-tree property both seem to do "the same thing", read the property listener's source — it's where the design intent is encoded.
+
+---
+
 ## 2026-05-05 (continued) — Phase 2 first cut: gRPC server + first RPC end-to-end ✅
 
 **Goal:** Stand up the gRPC layer in the engine. Get one read-side RPC (`ListTracks`) running end-to-end against a real Tracktion `Edit`.

@@ -41,3 +41,13 @@ target_link_libraries(clawdaw_engine PRIVATE
     Threads::Threads
     tracktion::tracktion_engine
 )
+
+# JUCE_MODAL_LOOPS_PERMITTED gates MessageManager::runDispatchLoopUntil, which
+# is the supported way to pump the JUCE message queue from a headless console
+# process. Without it, our main loop has no way to drain messages posted by
+# RPC handlers acquiring MessageManagerLock — they'd deadlock on first
+# mutation. Tracktion's own TestRunner sets this same flag for the same
+# reason.
+target_compile_definitions(clawdaw_engine PRIVATE
+    JUCE_MODAL_LOOPS_PERMITTED=1
+)

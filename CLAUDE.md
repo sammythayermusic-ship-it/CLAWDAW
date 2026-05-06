@@ -68,7 +68,7 @@ daw/
 
 ✅ **Phase 1: foundation validation.** Tracktion's DemoRunner builds and runs on this Mac (record + playback verified, 2026-05-05). Tracktion source is vendored at `engine/third_party/tracktion_engine/` with JUCE pinned to commit `19edd538` under `modules/juce/` (Tracktion master expects that exact JUCE; never use later JUCE develop with it).
 
-🟡 **Phase 2: gRPC layer in the engine — in progress.** First cut working as of 2026-05-05: `clawdaw_engine` boots a Tracktion `Engine` + in-memory `Edit`, runs a sync gRPC server with reflection on `127.0.0.1:50051`, and serves `ListTracks` against the real Edit (returns the 7 tracks Tracktion creates by default). Still to do for the first-10 RPC set: `GetProject`, `GetTrack`, `AddPlugin`, `SetPluginParameter`, `GetPluginParameters`, `SetTrackVolume`, `SetTrackPan`, `RenameTrack`, `Undo`. The first mutation is the architectural pivot — needs JUCE message-thread marshalling design.
+🟡 **Phase 2: gRPC layer in the engine — in progress.** Second cut as of 2026-05-06: `clawdaw_engine` serves seven RPCs end-to-end against a real Tracktion `Edit`. Reads: `ListTracks`, `GetProject`, `GetTrack`. Mutations: `RenameTrack`, `SetTrackVolume`, `SetTrackPan`, `Undo`. JUCE message-thread design landed — main thread runs `runDispatchLoopUntil` pump, gRPC handlers acquire `MessageManagerLock` for mutations, `JUCE_MODAL_LOOPS_PERMITTED=1` set in CMakeLists. Known gap: volume/pan changes don't go through `UndoManager` (Tracktion's `AutomatableParameter` bypasses undo by design); see the long comment in [engine/src/main.cc](engine/src/main.cc) at `SetTrackVolume` for the diagnosis and the planned side-band undo bridge fix. Still to do for the first-10: `AddPlugin`, `SetPluginParameter`, `GetPluginParameters` — these need Tracktion's plugin scanner first.
 
 ⏭️ **Phase 3: minimal UI.** Track list, transport bar, plugin chain view. No mixer skeuomorphism.
 
@@ -110,7 +110,7 @@ Later: full mixer, MIDI editing, automation, Splice/Suno, polished UI.
    - Tracktion + JUCE vendoring steps live in the 2026-05-05 entries of `docs/session-log.md` (curl tarballs into `engine/third_party/_downloads/`, extract Tracktion to `engine/third_party/tracktion_engine/`, extract JUCE-pinned at sha `19edd538` into `engine/third_party/tracktion_engine/modules/juce/`).
    - Generated proto stubs: `cd proto && buf generate`.
 4. Sanity-check the engine still builds: `cd engine && cmake -B build && cmake --build build --target clawdaw_engine -j 8`. Run it: `./engine/build/clawdaw_engine` should print `clawdaw_engine listening on 127.0.0.1:50051 (tracks in edit: 7)`.
-5. Then the actual work for the session — usually the next RPC from the Phase 2 first-10 list. The first mutation forces the JUCE message-thread design choice; don't decide it tired.
+5. Then the actual work for the session. The Phase 2 first-10 has three RPCs left: `AddPlugin`, `SetPluginParameter`, `GetPluginParameters`. They all need Tracktion's plugin scanner to be warmed up first, so probably start with `RescanPlugins` + `ListAvailablePlugins` even though those aren't in the strict first-10 — they're a precondition. The other queued task is the side-band undo bridge for parameter mutations (see the SetTrackVolume comment in main.cc).
 
 Don't add features beyond the next RPC unless you can articulate why. The proto contract already implies more than we have time for.
 
