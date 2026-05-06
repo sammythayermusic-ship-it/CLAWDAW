@@ -64,19 +64,19 @@ daw/
 
 ## Where we are right now
 
-✅ **Phase 0: design.** The architecture is decided. Proto schema is drafted at `proto/daw/v1/`.
+✅ **Phase 0: design.** Architecture decided. Proto schema in `proto/daw/v1/` (locked — never break v1).
 
-⏭️ **Phase 1: foundation validation.** Get Tracktion Engine running on the dev machine, play a file through a VST3, save and reload an Edit. This is "hello world" — see Part 3 of `docs/daw-build-planning.md` for the validation checklist. **Don't skip this. Two evenings, max.** The whole project depends on confirming the foundation works on this hardware.
+✅ **Phase 1: foundation validation.** Tracktion's DemoRunner builds and runs on this Mac (record + playback verified, 2026-05-05). Tracktion source is vendored at `engine/third_party/tracktion_engine/` with JUCE pinned to commit `19edd538` under `modules/juce/` (Tracktion master expects that exact JUCE; never use later JUCE develop with it).
 
-⏭️ **Phase 2: implement the gRPC layer in the engine.** Wire the Tracktion Engine actions to the proto-defined RPCs. Start with the read-side and basic mutations (the first 10 from the planning doc): `GetProject`, `GetTrack`, `ListTracks`, `AddPlugin`, `SetPluginParameter`, `GetPluginParameters`, `SetTrackVolume`, `SetTrackPan`, `RenameTrack`, `Undo`.
+🟡 **Phase 2: gRPC layer in the engine — in progress.** First cut working as of 2026-05-05: `clawdaw_engine` boots a Tracktion `Engine` + in-memory `Edit`, runs a sync gRPC server with reflection on `127.0.0.1:50051`, and serves `ListTracks` against the real Edit (returns the 7 tracks Tracktion creates by default). Still to do for the first-10 RPC set: `GetProject`, `GetTrack`, `AddPlugin`, `SetPluginParameter`, `GetPluginParameters`, `SetTrackVolume`, `SetTrackPan`, `RenameTrack`, `Undo`. The first mutation is the architectural pivot — needs JUCE message-thread marshalling design.
 
-⏭️ **Phase 3: minimal UI.** A track list, a transport bar, a plugin chain view. No mixer skeuomorphism. Just enough to interact.
+⏭️ **Phase 3: minimal UI.** Track list, transport bar, plugin chain view. No mixer skeuomorphism.
 
-⏭️ **Phase 4: agent v1.** Python MCP server that exposes the first 10 tools. Demo: Claude lists tracks, adds an EQ, tweaks parameters.
+⏭️ **Phase 4: agent v1.** Python MCP server exposing the first 10 RPCs as tools.
 
-⏭️ **Phase 5: listening.** Stream audio frames out to the agent, run YAMNet or PANNs on them, return classification. Auto-name tracks on `record_complete` events.
+⏭️ **Phase 5: listening.** Stream audio frames to the agent, classify with YAMNet/PANNs, auto-name tracks on `record_complete`.
 
-Later: full mixer, MIDI editing, automation, Splice/Suno integration, polished UI.
+Later: full mixer, MIDI editing, automation, Splice/Suno, polished UI.
 
 ## Conventions and constraints
 
@@ -102,15 +102,17 @@ Later: full mixer, MIDI editing, automation, Splice/Suno integration, polished U
 - **PyTorch / ONNX Runtime** — for the agent's ML inference (YAMNet / PANNs starting point)
 - **Tauri 2** — for the UI shell
 
-## What to do in your first session
+## What to do in your next session
 
-1. Read `docs/daw-build-planning.md` end to end.
-2. Read `proto/README.md` and skim the proto files to internalize the data model.
-3. Set up the `engine/` directory: clone JUCE and Tracktion Engine as submodules under `engine/third_party/`, write a `CMakeLists.txt` that builds against them.
-4. Build one of Tracktion's example projects unmodified, confirm it runs on this Mac.
-5. Then start the Phase 1 hello-world: a small program that plays an audio file through a VST3 and saves/reloads the Edit.
+1. Read `docs/session-log.md` from the top — newest entries first. It's the authoritative state of where we left off, what worked, and what's queued.
+2. Skim `proto/daw/v1/engine.proto` for the next RPC you're about to implement so the contract is fresh.
+3. If `engine/third_party/` or `engine/generated/` are missing on disk (they're gitignored), restore them before building:
+   - Tracktion + JUCE vendoring steps live in the 2026-05-05 entries of `docs/session-log.md` (curl tarballs into `engine/third_party/_downloads/`, extract Tracktion to `engine/third_party/tracktion_engine/`, extract JUCE-pinned at sha `19edd538` into `engine/third_party/tracktion_engine/modules/juce/`).
+   - Generated proto stubs: `cd proto && buf generate`.
+4. Sanity-check the engine still builds: `cd engine && cmake -B build && cmake --build build --target clawdaw_engine -j 8`. Run it: `./engine/build/clawdaw_engine` should print `clawdaw_engine listening on 127.0.0.1:50051 (tracks in edit: 7)`.
+5. Then the actual work for the session — usually the next RPC from the Phase 2 first-10 list. The first mutation forces the JUCE message-thread design choice; don't decide it tired.
 
-Don't write any of the gRPC layer until the audio foundation works. The temptation to start scaffolding everything at once is strong; resist it. A working `processBlock` chain is the only thing that proves the architecture is viable on this hardware.
+Don't add features beyond the next RPC unless you can articulate why. The proto contract already implies more than we have time for.
 
 ## When in doubt
 
