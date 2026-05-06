@@ -4,6 +4,90 @@ Append-only log of each work session. Newest at the top.
 
 ---
 
+## 2026-05-06 (continued) — Phase 2 finish-line: plugin RPCs ✅
+
+**Goal:** Implement the last three Phase 2 first-10 RPCs (`AddPlugin`, `SetPluginParameter`, `GetPluginParameters`) plus their preconditions (`RescanPlugins`, `ListAvailablePlugins`). Together these unlock the agent-native demo from CLAUDE.md: "list available plugins → add a compressor to a track → tweak a parameter."
+
+**Outcome:** Five new RPCs working end-to-end against a real Tracktion `Edit` and real third-party plugins. Phase 2 first-10 RPC set is complete (12 total: 4 reads, 6 mutations, 1 undo, plus `Undo`). All paths verified via `grpcurl` against AU plugins (Apple's AUVectorPanner) and the existing internal volume/pan plugin. Engine cleanly aborts in-progress scans on SIGINT and persists the scan cache across restarts.
+
+### What was built
+
+- [engine/src/main.cc](engine/src/main.cc) — five new handlers (`RescanPlugins`, `ListAvailablePlugins`, `AddPlugin`, `GetPluginParameters`, `SetPluginParameter`), five plugin helpers (`protoPluginFormat`, `protoPluginCategory`, `fillPluginInfo`, `fillPluginParameter`, `findPluginById`), `PluginManager::initialise()` call at startup, scan-cache flush on shutdown, and a `g_shutdown_requested` flag wired into the scan loop so `Ctrl+C` actually aborts an in-flight scan.
+- [engine/CMakeLists.txt](engine/CMakeLists.txt) — added `JUCE_PLUGINHOST_AU=1` and `JUCE_PLUGINHOST_VST3=1` compile defines. Without these, `pluginFormatManager.addDefaultFormats()` registers no formats and scans are silent no-ops. (Same flags Tracktion's TestRunner sets.)
+- Same file: explicit `#include "daw/v1/plugin.pb.h"` in main.cc; previously transitive through engine.grpc.pb.h.
+
+### Architectural decision: callAsync for plugin instantiation, MessageManagerLock for simple mutations
+
+The session's biggest surprise: `MessageManagerLock` works fine for cheap value-tree mutations (rename, volume, pan) but **deadlocks on AU plugin instantiation**. Symptoms: `AddPlugin` would hang for 60s+ on every Apple AU, with no error logged.
+
+Root cause: AU instantiation on macOS dispatches to internal `AudioComponentInstanceNew` queues that need the JUCE message thread to be **actively running**, not just held by a worker. With `MessageManagerLock`, the worker holds the lock and the message thread is paused. AU instantiation queues a message and waits for it; the message thread can't dispatch (it's paused); deadlock.
+
+The fix in `AddPlugin` is `juce::MessageManager::callAsync(...)` plus a `std::promise/std::future`: the work is queued for the actual message thread, the calling worker blocks on the future, and the dispatch loop continues processing internal AU/JUCE messages around our work. AU instantiation completes in ~1 second instead of hanging.
+
+We did NOT migrate the simple mutations (`SetTrackVolume`, `SetTrackPan`, `RenameTrack`, `Undo`, `SetPluginParameter`). Those work with `MessageManagerLock` and are well-documented. The decision rule for future RPCs: **plugin loading or anything that touches AU/VST3 instance lifecycle uses `callAsync` + future; plain value-tree property mutations use `MessageManagerLock`.**
+
+### Plugin scanner gotchas
+
+- **Scans take 30–120s on macOS.** Apple validates each AU in a subprocess (`AUValidationTool`); plugins that touch Gatekeeper trigger user prompts on first scan. We let the scan block the gRPC handler synchronously. UX wart for a CLI client; goes away when `SubscribeEvents` lands and clients can stream scan progress.
+- **Cache persistence required two fixes.** Tracktion's `PluginManager` registers a change listener that re-serializes `knownPluginList` to `PropertyStorage` on every change. But the underlying `juce::PropertiesFile` buffers writes on a timer (~3s default) — we explicitly call `getPropertiesFile().saveIfNeeded()` at the end of every scan and on engine shutdown so the cache survives `Ctrl+C` even mid-scan.
+- **`g_shutdown_requested` checked between `scanNextFile` calls** so SIGINT during a scan exits in <1s instead of waiting for the entire format to finish (which previously caused `server->Shutdown()` to hang). The current scan plugin still has to finish before we notice the flag, but that's <5s in practice.
+- **`PluginManager::initialise()` MUST be called before anything touches `knownPluginList`** — internal asserts fire otherwise. Inserted at startup right after `te::Engine engine{"CLAWDAW"};`.
+- **Built-in plugins (volume, level meter) aren't in `knownPluginList`** so `ListAvailablePlugins` doesn't return them. They still appear in `GetTrack`'s plugin chain; users add VST3/AU plugins, which is the actual workflow.
+
+### Verification
+
+Full smoke against AU plugins on this Mac (94 cached after a 60s partial scan):
+
+```sh
+# Returns 94 PluginInfo entries with id/name/vendor/format/category/isInstrument/version/file_path
+grpcurl -plaintext :50079 daw.v1.Engine/ListAvailablePlugins
+
+# Apple AUVectorPanner instantiated and inserted at end of Track 1's chain.
+# Track now has 3 plugins: Volume & Pan, Level Meter, AUVectorPanner.
+grpcurl -plaintext -d '{"track_id":"1003","plugin_id":"AudioUnit-AUVectorPanner-aa66a1b9-76676171"}' \
+    :50079 daw.v1.Engine/AddPlugin
+# → {"pluginInstanceId":"1013","mutation":{"commitId":"...","description":"Added plugin: AUVectorPanner"}}
+
+# 8 parameters returned with display values formatted: "+0.0 dB", "Centre", etc.
+grpcurl -plaintext -d '{"plugin_instance_id":"1013"}' :50079 daw.v1.Engine/GetPluginParameters
+
+# Sets the parameter, returns commit_id + "Set Dry Level"
+grpcurl -plaintext -d '{"plugin_instance_id":"1013","param_id":"dry level","normalized":0.7}' \
+    :50079 daw.v1.Engine/SetPluginParameter
+```
+
+Error paths checked: NOT_FOUND for bogus track/plugin/instance/param ids, INVALID_ARGUMENT for empty plugin_id/param_id. Engine exits cleanly on SIGINT (<5s, even mid-scan).
+
+### Known limitations
+
+- **Plugin parameter changes still bypass `UndoManager`.** Same gap as `SetTrackVolume`/`SetTrackPan`; same side-band undo bridge follow-up. Documented in the SetPluginParameter handler.
+- **No scan progress events.** `RescanPlugins` blocks the gRPC handler 30-120s with no streaming feedback; only stderr logs `Scanning <fmt>: <name>` lines on the engine side. Lifts when `SubscribeEvents` is implemented.
+- **`PluginInfo.id` heuristic uses `juce::PluginDescription::createIdentifierString()`.** Stable per-machine; not necessarily portable across machines.
+- **Slot semantics.** `AddPluginRequest.slot` is `uint32` with proto3 default 0, which clashes with proto's `omit/-1 = append` doc. We treat the value literally and let Tracktion's `insertPlugin` silently append for out-of-range indices. Flagged for v2.
+- **`PluginCategory` mapping is heuristic.** JUCE's `PluginDescription.category` is free-text; we substring-match against the proto enum (EQ, REVERB, DELAY, etc.). The order matters; instrument-fallback is last. Some plugins will land in `PLUGIN_CATEGORY_EFFECT` when a more specific bucket exists.
+
+### Repo state at end of session
+
+- [engine/src/main.cc](engine/src/main.cc): now ~600 lines with 12 RPC handlers. Single file is starting to feel cramped; refactor into per-area files (track.cc, plugin.cc, helpers.h) when convenient — not urgent.
+- [engine/CMakeLists.txt](engine/CMakeLists.txt): three JUCE module flags (MODAL_LOOPS, PLUGINHOST_AU, PLUGINHOST_VST3).
+- Scan cache lives in `~/Library/CLAWDAW/Settings.xml`. ClawdawDeadMans next to it. Both stable across runs.
+- All four files modified this session: main.cc, CMakeLists.txt, session-log.md, CLAUDE.md.
+
+### What's next
+
+Phase 2 first-10 is done. Reasonable next bites:
+
+1. **Side-band undo bridge for parameter mutations.** Track `{commit_id → {parameter_handle, before_value, after_value}}` in our own map; intercept `Undo` to consult that map first, replay inverse if a hit, otherwise fall through to Tracktion's `UndoManager`. Closes the documented gap that volume/pan/plugin-param changes leave behind.
+2. **`SubscribeEvents`** — even a v1 with just scan-progress events would massively improve `RescanPlugins` UX and unblocks all our streaming RPCs.
+3. **Phase 3 UI** can run in parallel — engine has enough of a contract to wire a track list + transport bar + plugin chain view.
+4. **Refactor main.cc** when it grows past the 600-line mark in another session.
+
+### Time spent
+
+~3 hours. The bulk was the AU instantiation deadlock — about 90 minutes between observing "AddPlugin hangs", trying multiple approaches (different plugins, longer timeouts, explicit `MessageManagerLock` on a different scope), and finally landing on `callAsync + future`. Lesson: when a call hangs with no error logged in JUCE/Tracktion, the first hypothesis to test is **"is the message thread paused while something async needs it?"** That's now in feedback memory.
+
+---
+
 ## 2026-05-06 — Phase 2 second cut: GetProject, GetTrack, three mutations, Undo ✅
 
 **Goal:** Pick up Phase 2 from the last session's first cut. Implement the remaining read RPCs (`GetProject`, `GetTrack`), make the architectural decision about JUCE message-thread marshalling, then ship the first mutating RPCs (`RenameTrack`, `SetTrackVolume`, `SetTrackPan`) and `Undo`. Leave the plugin RPCs (`AddPlugin`, `SetPluginParameter`, `GetPluginParameters`) for the next session — those need the Tracktion plugin scanner first.

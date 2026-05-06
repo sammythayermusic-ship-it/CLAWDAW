@@ -1,5 +1,6 @@
 #include <atomic>
 #include <csignal>
+#include <future>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -14,9 +15,15 @@
 #include "daw/v1/engine.grpc.pb.h"
 #include "daw/v1/project.pb.h"
 #include "daw/v1/common.pb.h"
+#include "daw/v1/plugin.pb.h"
 
 namespace te = tracktion::engine;
 namespace tc = tracktion;  // TimePosition / TimeDuration live here, not in te::
+
+// Set by the SIGINT/SIGTERM handler. Read by main()'s pump loop and by
+// long-running RPC handlers (notably RescanPlugins) so they can break out
+// rather than running to completion when the operator wants to exit.
+namespace { std::atomic<bool> g_shutdown_requested{false}; }
 
 namespace {
 
@@ -89,6 +96,67 @@ auto runOnMessageThread(Fn&& fn) -> decltype(fn()) {
 void fillMutationResult(daw::v1::MutationResult* dst, std::string description) {
     dst->set_commit_id(makeCommitId());
     dst->set_description(std::move(description));
+}
+
+// ----------------------------------------------------------------------------
+// Plugin helpers.
+// ----------------------------------------------------------------------------
+
+daw::v1::PluginFormat protoPluginFormat(const juce::String& fmt) {
+    if (fmt == te::PluginManager::builtInPluginFormatName) return daw::v1::PLUGIN_FORMAT_INTERNAL;
+    if (fmt == "VST3")      return daw::v1::PLUGIN_FORMAT_VST3;
+    if (fmt == "AudioUnit") return daw::v1::PLUGIN_FORMAT_AU;
+    if (fmt == "CLAP")      return daw::v1::PLUGIN_FORMAT_CLAP;
+    return daw::v1::PLUGIN_FORMAT_UNSPECIFIED;
+}
+
+// JUCE PluginDescription.category is free-text. We do a heuristic substring
+// match against the proto enum. Order matters: more specific keywords come
+// first so e.g. "Compressor" doesn't fall through to the generic "Effect"
+// bucket. The instrument fallback intentionally runs last so a plugin that
+// describes itself as "Synth Reverb" still ends up under REVERB.
+daw::v1::PluginCategory protoPluginCategory(const juce::String& cat, bool isInstrument) {
+    const auto c = cat.toLowerCase();
+    if (c.contains("eq"))                                          return daw::v1::PLUGIN_CATEGORY_EQ;
+    if (c.contains("comp") || c.contains("limit") || c.contains("dynamic")) return daw::v1::PLUGIN_CATEGORY_DYNAMICS;
+    if (c.contains("reverb"))                                      return daw::v1::PLUGIN_CATEGORY_REVERB;
+    if (c.contains("delay") || c.contains("echo"))                 return daw::v1::PLUGIN_CATEGORY_DELAY;
+    if (c.contains("chorus") || c.contains("phaser") || c.contains("flanger") || c.contains("modulat")) return daw::v1::PLUGIN_CATEGORY_MODULATION;
+    if (c.contains("distort") || c.contains("saturat") || c.contains("overdrive")) return daw::v1::PLUGIN_CATEGORY_DISTORTION;
+    if (c.contains("analy") || c.contains("meter"))                return daw::v1::PLUGIN_CATEGORY_ANALYZER;
+    if (c.contains("util"))                                        return daw::v1::PLUGIN_CATEGORY_UTILITY;
+    if (isInstrument || c.contains("synth") || c.contains("instrument") || c.contains("sampler")) return daw::v1::PLUGIN_CATEGORY_INSTRUMENT;
+    return daw::v1::PLUGIN_CATEGORY_EFFECT;
+}
+
+void fillPluginInfo(daw::v1::PluginInfo* dst, const juce::PluginDescription& d) {
+    dst->set_id(d.createIdentifierString().toStdString());
+    dst->set_name(d.name.toStdString());
+    dst->set_vendor(d.manufacturerName.toStdString());
+    dst->set_format(protoPluginFormat(d.pluginFormatName));
+    dst->set_category(protoPluginCategory(d.category, d.isInstrument));
+    dst->set_is_instrument(d.isInstrument);
+    dst->set_version(d.version.toStdString());
+    dst->set_file_path(d.fileOrIdentifier.toStdString());
+}
+
+void fillPluginParameter(daw::v1::PluginParameter* dst, te::AutomatableParameter& p) {
+    const auto range = p.getValueRange();
+    dst->set_id(p.paramID.toStdString());
+    dst->set_name(p.getParameterName().toStdString());
+    dst->set_value(p.getCurrentValue());
+    dst->set_normalized(p.getCurrentNormalisedValue());
+    dst->set_min(range.getStart());
+    dst->set_max(range.getEnd());
+    dst->set_unit(p.getLabel().toStdString());
+    dst->set_automatable(true);  // every AutomatableParameter is, by definition.
+    dst->set_display_value(p.valueToString(p.getCurrentValue()).toStdString());
+}
+
+te::Plugin::Ptr findPluginById(te::Edit& edit, const std::string& id) {
+    auto eid = te::EditItemID::fromString(juce::String(id));
+    if (! eid.isValid()) return {};
+    return te::findPluginForID(edit, eid);
 }
 
 // ----------------------------------------------------------------------------
@@ -343,6 +411,193 @@ public:
         return grpc::Status::OK;
     }
 
+    // -------- Plugins --------
+
+    grpc::Status RescanPlugins(grpc::ServerContext* /*context*/,
+                               const google::protobuf::Empty* /*request*/,
+                               daw::v1::MutationResult* response) override {
+        // We deliberately do NOT acquire the MessageManagerLock here. A full
+        // VST3+AU scan can take 30-120s on macOS (Gatekeeper validates each AU
+        // in a subprocess). Holding the message-manager lock that long would
+        // block every other RPC handler and stall the dispatch pump. JUCE's
+        // KnownPluginList does its own internal locking, so concurrent reads
+        // (ListAvailablePlugins, etc.) remain safe.
+        auto& pm = engine_.getPluginManager();
+        const auto deadMans = engine_.getPropertyStorage().getAppCacheFolder()
+                                   .getChildFile("ClawdawDeadMans");
+
+        bool aborted = false;
+        for (auto* fmt : pm.pluginFormatManager.getFormats()) {
+            if (fmt == nullptr) continue;
+            if (fmt->getName() == te::PluginManager::builtInPluginFormatName) continue;
+            if (g_shutdown_requested.load()) { aborted = true; break; }
+
+            juce::PluginDirectoryScanner scanner(pm.knownPluginList, *fmt,
+                                                 fmt->getDefaultLocationsToSearch(),
+                                                 /*recurse=*/true, deadMans);
+            juce::String currentName;
+            while (scanner.scanNextFile(/*dontRescanIfAlreadyInList=*/true, currentName)) {
+                std::cerr << "Scanning " << fmt->getName() << ": " << currentName << "\n";
+                // Bail out promptly if the engine is shutting down. Without
+                // this, a Ctrl+C during scan would block server->Shutdown()
+                // until the entire format finishes — could be many minutes.
+                if (g_shutdown_requested.load()) { aborted = true; break; }
+            }
+            if (aborted) break;
+        }
+        std::cerr << (aborted ? "Scan aborted: " : "Scan complete: ")
+                  << pm.knownPluginList.getNumTypes() << " plugins known.\n";
+
+        // Force the underlying PropertiesFile (which buffers writes on a
+        // timer) to flush to disk so the scan cache survives the next
+        // process restart. Without this, a SIGINT shortly after a long
+        // scan loses the results.
+        engine_.getPropertyStorage().getPropertiesFile().saveIfNeeded();
+
+        if (aborted) {
+            return grpc::Status(grpc::StatusCode::ABORTED, "Scan aborted by shutdown");
+        }
+        fillMutationResult(response, "Rescanned plugins");
+        return grpc::Status::OK;
+    }
+
+    grpc::Status ListAvailablePlugins(grpc::ServerContext* /*context*/,
+                                      const google::protobuf::Empty* /*request*/,
+                                      daw::v1::ListAvailablePluginsResponse* response) override {
+        // KnownPluginList::getTypes returns a copy of the internal array, so
+        // no lock is needed. Built-in plugins (volume, level meter, etc.) are
+        // not in this list — they're created implicitly by Tracktion when an
+        // Edit is built and don't go through the scanner.
+        for (const auto& d : engine_.getPluginManager().knownPluginList.getTypes()) {
+            fillPluginInfo(response->add_plugins(), d);
+        }
+        return grpc::Status::OK;
+    }
+
+    grpc::Status AddPlugin(grpc::ServerContext* /*context*/,
+                           const daw::v1::AddPluginRequest* request,
+                           daw::v1::AddPluginResponse* response) override {
+        auto* track = findTrackById(edit_, request->track_id());
+        if (track == nullptr) {
+            return grpc::Status(grpc::StatusCode::NOT_FOUND,
+                                "Track not found: " + request->track_id());
+        }
+        if (request->plugin_id().empty()) {
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                                "plugin_id required");
+        }
+
+        const juce::String wantedID(request->plugin_id());
+        juce::PluginDescription found;
+        bool foundIt = false;
+        for (const auto& d : engine_.getPluginManager().knownPluginList.getTypes()) {
+            if (d.createIdentifierString() == wantedID) {
+                found = d;
+                foundIt = true;
+                break;
+            }
+        }
+        if (! foundIt) {
+            return grpc::Status(grpc::StatusCode::NOT_FOUND,
+                                "Unknown plugin_id: " + request->plugin_id());
+        }
+
+        // Note on slot semantics: proto `uint32 slot = 3` defaults to 0, so a
+        // client that omits it is asking for slot 0 (first in the chain).
+        // Tracktion's PluginList::insertPlugin treats out-of-range indices
+        // as "append", so passing the proto value through directly gives the
+        // user a way to append by sending a deliberately large slot. The
+        // proto's "omit/-1 = append" comment doesn't translate cleanly to
+        // unsigned ints — flagged for v2 cleanup.
+        //
+        // We use callAsync + a future here instead of MessageManagerLock.
+        // AU plugin instantiation on macOS dispatches to internal queues that
+        // need the message thread to be ACTIVELY running, not just held by
+        // a worker thread. With MessageManagerLock the worker thread holds
+        // the lock and the message thread is paused, so AU instantiation
+        // deadlocks (observed: 60s+ hangs on every AU we tried). With
+        // callAsync, the work runs on the actual message thread and the
+        // dispatch loop continues processing internal AU/JUCE messages
+        // around it.
+        std::promise<te::Plugin::Ptr> pluginPromise;
+        auto pluginFuture = pluginPromise.get_future();
+        const int slot = (int) request->slot();
+        juce::MessageManager::callAsync([this, track, slot, found, &pluginPromise]() mutable {
+            edit_.getUndoManager().beginNewTransaction("Add plugin");
+            auto p = edit_.getPluginCache().createNewPlugin(te::ExternalPlugin::xmlTypeName, found);
+            if (p) {
+                track->pluginList.insertPlugin(p, slot, nullptr);
+            }
+            pluginPromise.set_value(p);
+        });
+        te::Plugin::Ptr plugin = pluginFuture.get();
+
+        if (! plugin) {
+            return grpc::Status(grpc::StatusCode::INTERNAL,
+                                "Plugin instantiation failed");
+        }
+
+        response->set_plugin_instance_id(plugin->itemID.toString().toStdString());
+        fillMutationResult(response->mutable_mutation(),
+                           "Added plugin: " + plugin->getName().toStdString());
+        return grpc::Status::OK;
+    }
+
+    grpc::Status GetPluginParameters(grpc::ServerContext* /*context*/,
+                                     const daw::v1::GetPluginParametersRequest* request,
+                                     daw::v1::GetPluginParametersResponse* response) override {
+        auto plugin = findPluginById(edit_, request->plugin_instance_id());
+        if (! plugin) {
+            return grpc::Status(grpc::StatusCode::NOT_FOUND,
+                                "Plugin not found: " + request->plugin_instance_id());
+        }
+        for (auto* p : plugin->getAutomatableParameters()) {
+            if (p == nullptr) continue;
+            fillPluginParameter(response->add_parameters(), *p);
+        }
+        return grpc::Status::OK;
+    }
+
+    grpc::Status SetPluginParameter(grpc::ServerContext* /*context*/,
+                                    const daw::v1::SetPluginParameterRequest* request,
+                                    daw::v1::MutationResult* response) override {
+        auto plugin = findPluginById(edit_, request->plugin_instance_id());
+        if (! plugin) {
+            return grpc::Status(grpc::StatusCode::NOT_FOUND,
+                                "Plugin not found: " + request->plugin_instance_id());
+        }
+        if (request->param_id().empty()) {
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                                "param_id required");
+        }
+
+        auto param = plugin->getAutomatableParameterByID(juce::String(request->param_id()));
+        if (! param) {
+            return grpc::Status(grpc::StatusCode::NOT_FOUND,
+                                "Param not found: " + request->param_id());
+        }
+
+        // Same parameter-undo gap as SetTrackVolume — see the long comment
+        // there. For this RPC, the change is applied but is not undoable
+        // through the standard Undo RPC.
+        runOnMessageThread([&] {
+            edit_.getUndoManager().beginNewTransaction("Set plugin param");
+            switch (request->value_case()) {
+                case daw::v1::SetPluginParameterRequest::kNativeValue:
+                    param->setParameter((float) request->native_value(), juce::sendNotification);
+                    break;
+                case daw::v1::SetPluginParameterRequest::kNormalized:
+                    param->setNormalisedParameter((float) request->normalized(), juce::sendNotification);
+                    break;
+                default:
+                    break;  // neither set; leave param alone.
+            }
+        });
+
+        fillMutationResult(response, "Set " + param->getParameterName().toStdString());
+        return grpc::Status::OK;
+    }
+
 private:
     te::Engine& engine_;
     te::Edit& edit_;
@@ -357,8 +612,6 @@ private:
 // ----------------------------------------------------------------------------
 
 namespace {
-std::atomic<bool> g_shutdown_requested{false};
-
 void signalHandler(int /*signal*/) {
     g_shutdown_requested.store(true);
     // stopDispatchLoop is a no-op for runDispatchLoopUntil, but harmless and
@@ -379,6 +632,12 @@ int main(int argc, char** argv) {
     // Tracktion's Engine constructor wires up plugin scanning, device
     // management, and the engine-wide settings store. One per process.
     te::Engine engine{"CLAWDAW"};
+
+    // PluginManager::initialise() registers VST3/AU formats with the
+    // pluginFormatManager and restores the on-disk scan cache. Required
+    // before RescanPlugins, AddPlugin, or anything else that touches
+    // knownPluginList — Tracktion asserts on the first such call otherwise.
+    engine.getPluginManager().initialise();
 
     auto edit = te::Edit::createSingleTrackEdit(engine);
     edit->ensureNumberOfAudioTracks(2);
@@ -415,6 +674,10 @@ int main(int argc, char** argv) {
     while (! g_shutdown_requested.load()) {
         juce::MessageManager::getInstance()->runDispatchLoopUntil(50);
     }
+
+    // Flush any pending property writes (notably the plugin scan cache) so
+    // they're durable before we exit.
+    engine.getPropertyStorage().getPropertiesFile().saveIfNeeded();
 
     server->Shutdown();
     grpc_thread.join();

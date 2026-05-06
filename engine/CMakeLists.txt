@@ -42,12 +42,18 @@ target_link_libraries(clawdaw_engine PRIVATE
     tracktion::tracktion_engine
 )
 
-# JUCE_MODAL_LOOPS_PERMITTED gates MessageManager::runDispatchLoopUntil, which
-# is the supported way to pump the JUCE message queue from a headless console
-# process. Without it, our main loop has no way to drain messages posted by
-# RPC handlers acquiring MessageManagerLock — they'd deadlock on first
-# mutation. Tracktion's own TestRunner sets this same flag for the same
-# reason.
+# JUCE module flags. These have to be set on the executable target because
+# JUCE modules are compiled as part of it (Tracktion adds the .cpp/.mm files
+# as INTERFACE sources). Tracktion's own examples use the same set:
+#   - JUCE_MODAL_LOOPS_PERMITTED enables MessageManager::runDispatchLoopUntil,
+#     which is how our main loop pumps the queue in a headless console
+#     process. Without it, RPC handlers acquiring MessageManagerLock from
+#     worker threads would deadlock.
+#   - JUCE_PLUGINHOST_AU / _VST3 register the AU and VST3 plugin formats with
+#     pluginFormatManager.addDefaultFormats(). Without them, RescanPlugins
+#     scans nothing because there are no formats to enumerate over.
 target_compile_definitions(clawdaw_engine PRIVATE
     JUCE_MODAL_LOOPS_PERMITTED=1
+    JUCE_PLUGINHOST_AU=1
+    JUCE_PLUGINHOST_VST3=1
 )
