@@ -1,4 +1,6 @@
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <csignal>
 #include <deque>
 #include <functional>
@@ -8,6 +10,8 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 
 #include <google/protobuf/empty.pb.h>
 #include <grpcpp/grpcpp.h>
@@ -19,6 +23,7 @@
 #include "daw/v1/project.pb.h"
 #include "daw/v1/common.pb.h"
 #include "daw/v1/plugin.pb.h"
+#include "daw/v1/events.pb.h"
 
 namespace te = tracktion::engine;
 namespace tc = tracktion;  // TimePosition / TimeDuration live here, not in te::
@@ -115,8 +120,10 @@ inline void runOnMessageThreadSync(std::function<void()> fn) {
     fut.wait();
 }
 
-void fillMutationResult(daw::v1::MutationResult* dst, std::string description) {
-    dst->set_commit_id(makeCommitId());
+void fillMutationResult(daw::v1::MutationResult* dst,
+                        const std::string& commit_id,
+                        std::string description) {
+    dst->set_commit_id(commit_id);
     dst->set_description(std::move(description));
 }
 
@@ -180,6 +187,146 @@ te::Plugin::Ptr findPluginById(te::Edit& edit, const std::string& id) {
     if (! eid.isValid()) return {};
     return te::findPluginForID(edit, eid);
 }
+
+// ----------------------------------------------------------------------------
+// Event broadcaster: backs the SubscribeEvents server-streaming RPC.
+//
+// Each call to SubscribeEvents creates a Subscription with its own bounded
+// event queue + condition variable. Mutating handlers call broadcast(evt);
+// the broadcaster drops a copy into every active subscriber's queue (after
+// applying that subscriber's filter), and the SubscribeEvents handler thread
+// drains the queue onto the wire.
+//
+// Lifetime: Subscription is owned by the SubscribeEvents handler (shared_ptr
+// kept on its stack); the broadcaster only holds weak_ptrs. When the handler
+// returns, the Subscription is destroyed and broadcasts skip the expired
+// weak_ptrs. No explicit unsubscribe is needed.
+// ----------------------------------------------------------------------------
+
+const char* eventTypeName(const daw::v1::Event& e) {
+    using P = daw::v1::Event;
+    switch (e.payload_case()) {
+        case P::kProjectLoaded:         return "project_loaded";
+        case P::kProjectSaved:          return "project_saved";
+        case P::kTempoChanged:          return "tempo_changed";
+        case P::kKeyChanged:            return "key_changed";
+        case P::kTrackAdded:            return "track_added";
+        case P::kTrackRemoved:          return "track_removed";
+        case P::kTrackRenamed:          return "track_renamed";
+        case P::kTrackMixerChanged:     return "track_mixer_changed";
+        case P::kRegionAdded:           return "region_added";
+        case P::kRegionRemoved:         return "region_removed";
+        case P::kRegionMoved:           return "region_moved";
+        case P::kPluginAdded:           return "plugin_added";
+        case P::kPluginRemoved:         return "plugin_removed";
+        case P::kPluginParamChanged:    return "plugin_param_changed";
+        case P::kPluginBypassed:        return "plugin_bypassed";
+        case P::kRecordStarted:         return "record_started";
+        case P::kRecordComplete:        return "record_complete";
+        case P::kTransportStateChanged: return "transport_state_changed";
+        case P::kCommandApplied:        return "command_applied";
+        case P::kCommandUndone:         return "command_undone";
+        case P::PAYLOAD_NOT_SET:        return "";
+    }
+    return "";
+}
+
+// Returns the track_id this event scopes to, or empty string if it doesn't
+// scope to any single track. Events that don't scope to a track are emitted
+// to subscribers regardless of the track_ids filter.
+std::string eventTrackId(const daw::v1::Event& e) {
+    using P = daw::v1::Event;
+    switch (e.payload_case()) {
+        case P::kTrackAdded:        return e.track_added().track_id();
+        case P::kTrackRemoved:      return e.track_removed().track_id();
+        case P::kTrackRenamed:      return e.track_renamed().track_id();
+        case P::kTrackMixerChanged: return e.track_mixer_changed().track_id();
+        case P::kRegionAdded:       return e.region_added().track_id();
+        case P::kPluginAdded:       return e.plugin_added().track_id();
+        case P::kRecordStarted:     return e.record_started().track_id();
+        case P::kRecordComplete:    return e.record_complete().track_id();
+        default:                    return "";
+    }
+}
+
+bool matchesFilter(const daw::v1::Event& e, const daw::v1::EventFilter& f) {
+    if (! f.event_types().empty()) {
+        const std::string name = eventTypeName(e);
+        bool found = false;
+        for (const auto& t : f.event_types()) {
+            if (t == name) { found = true; break; }
+        }
+        if (! found) return false;
+    }
+    if (! f.track_ids().empty()) {
+        const std::string tid = eventTrackId(e);
+        if (tid.empty()) return true;  // event has no track scope; let through
+        bool found = false;
+        for (const auto& t : f.track_ids()) {
+            if (t == tid) { found = true; break; }
+        }
+        if (! found) return false;
+    }
+    return true;
+}
+
+class EventBroadcaster {
+public:
+    struct Subscription {
+        daw::v1::EventFilter filter;
+        std::deque<daw::v1::Event> queue;
+        std::mutex queue_mutex;
+        std::condition_variable cv;
+        // If a slow consumer hits this size we drop the OLDEST event to make
+        // room. Better than blocking the broadcaster or unbounded growth.
+        static constexpr size_t kMaxQueueSize = 1024;
+    };
+    using Ptr = std::shared_ptr<Subscription>;
+
+    Ptr subscribe(daw::v1::EventFilter filter) {
+        auto sub = std::make_shared<Subscription>();
+        sub->filter = std::move(filter);
+        std::lock_guard<std::mutex> lock(subs_mutex_);
+        subs_.push_back(sub);
+        return sub;
+    }
+
+    void broadcast(const daw::v1::Event& evt) {
+        std::vector<Ptr> live;
+        {
+            std::lock_guard<std::mutex> lock(subs_mutex_);
+            // Compact expired weaks while we're here.
+            for (auto it = subs_.begin(); it != subs_.end();) {
+                if (auto p = it->lock()) { live.push_back(p); ++it; }
+                else                      { it = subs_.erase(it); }
+            }
+        }
+        for (auto& sub : live) {
+            if (! matchesFilter(evt, sub->filter)) continue;
+            {
+                std::lock_guard<std::mutex> lock(sub->queue_mutex);
+                if (sub->queue.size() >= Subscription::kMaxQueueSize) {
+                    sub->queue.pop_front();
+                }
+                sub->queue.push_back(evt);
+            }
+            sub->cv.notify_one();
+        }
+    }
+
+    // Wake every subscription so SubscribeEvents handlers can re-check
+    // shutdown flags and exit cleanly.
+    void wakeAll() {
+        std::lock_guard<std::mutex> lock(subs_mutex_);
+        for (auto& w : subs_) {
+            if (auto p = w.lock()) p->cv.notify_all();
+        }
+    }
+
+private:
+    std::mutex subs_mutex_;
+    std::vector<std::weak_ptr<Subscription>> subs_;
+};
 
 // ----------------------------------------------------------------------------
 // gRPC service implementation.
@@ -322,17 +469,36 @@ public:
                                 "Track not found: " + request->track_id());
         }
 
-        // Capture before-name and write the new one. We deliberately do NOT
-        // use Tracktion's UndoManager — see the comment on undo_log_ for why
-        // we maintain our own LIFO instead.
+        const auto commit_id = makeCommitId();
+        const std::string track_id = track->itemID.toString().toStdString();
         const std::string beforeName = track->getName().toStdString();
-        runOnMessageThread([&] { track->setName(juce::String(request->name())); });
+        const std::string newName = request->name();
+        const std::string description = "Renamed track to \"" + newName + "\"";
 
-        pushUndo([track, beforeName] {
+        runOnMessageThread([&] { track->setName(juce::String(newName)); });
+
+        // Type-specific event for the new state.
+        {
+            daw::v1::Event e;
+            auto* tr = e.mutable_track_renamed();
+            tr->set_track_id(track_id);
+            tr->set_new_name(newName);
+            emitEvent(std::move(e));
+        }
+
+        // Push the undo. The closure does the revert AND emits the inverse
+        // type-specific event so streaming subscribers see the rename undone.
+        pushUndo(commit_id, description, [this, track, track_id, beforeName] {
             runOnMessageThread([&] { track->setName(juce::String(beforeName)); });
+            daw::v1::Event e;
+            auto* tr = e.mutable_track_renamed();
+            tr->set_track_id(track_id);
+            tr->set_new_name(beforeName);
+            emitEvent(std::move(e));
         });
 
-        fillMutationResult(response, "Renamed track to \"" + request->name() + "\"");
+        emitCommandApplied(commit_id, description);
+        fillMutationResult(response, commit_id, description);
         return grpc::Status::OK;
     }
 
@@ -358,15 +524,29 @@ public:
         // Capture before-value, run the setter, push a replay closure into
         // the side-band undo log. See the comment on undo_log_ for why we
         // don't go through Tracktion's UndoManager.
+        const auto commit_id = makeCommitId();
+        const std::string track_id = track->itemID.toString().toStdString();
         const float beforeDb = vp->getVolumeDb();
         const float dbValue = (float) request->volume_db();
+        const std::string description = "Set track volume to " + std::to_string(dbValue) + " dB";
+
         runOnMessageThread([&] { vp->setVolumeDb(dbValue); });
 
-        pushUndo([vp, beforeDb] {
+        {
+            daw::v1::Event e;
+            e.mutable_track_mixer_changed()->set_track_id(track_id);
+            emitEvent(std::move(e));
+        }
+
+        pushUndo(commit_id, description, [this, vp, track_id, beforeDb] {
             runOnMessageThread([&] { vp->setVolumeDb(beforeDb); });
+            daw::v1::Event e;
+            e.mutable_track_mixer_changed()->set_track_id(track_id);
+            emitEvent(std::move(e));
         });
 
-        fillMutationResult(response, "Set track volume to " + std::to_string(dbValue) + " dB");
+        emitCommandApplied(commit_id, description);
+        fillMutationResult(response, commit_id, description);
         return grpc::Status::OK;
     }
 
@@ -396,14 +576,28 @@ public:
         }
 
         // Same capture-replay pattern as SetTrackVolume.
+        const auto commit_id = makeCommitId();
+        const std::string track_id = track->itemID.toString().toStdString();
         const float beforePan = vp->getPan();
+        const std::string description = "Set track pan to " + std::to_string(panValue);
+
         runOnMessageThread([&] { vp->setPan(panValue); });
 
-        pushUndo([vp, beforePan] {
+        {
+            daw::v1::Event e;
+            e.mutable_track_mixer_changed()->set_track_id(track_id);
+            emitEvent(std::move(e));
+        }
+
+        pushUndo(commit_id, description, [this, vp, track_id, beforePan] {
             runOnMessageThread([&] { vp->setPan(beforePan); });
+            daw::v1::Event e;
+            e.mutable_track_mixer_changed()->set_track_id(track_id);
+            emitEvent(std::move(e));
         });
 
-        fillMutationResult(response, "Set track pan to " + std::to_string(panValue));
+        emitCommandApplied(commit_id, description);
+        fillMutationResult(response, commit_id, description);
         return grpc::Status::OK;
     }
 
@@ -411,22 +605,34 @@ public:
                       const daw::v1::UndoRequest* /*request*/,
                       daw::v1::MutationResult* response) override {
         // commit_id-targeted undo is in the proto contract but not supported
-        // yet — both Tracktion's UndoManager and our side-band log are LIFO.
-        // Selective undo would require separating dependent commits, which
-        // the agent doesn't need today. v2 fodder.
-        std::function<void()> revert;
+        // yet — our log is LIFO. Selective undo would require separating
+        // dependent commits, which the agent doesn't need today. v2 fodder.
+        UndoEntry entry;
         {
             std::lock_guard<std::mutex> lock(undo_log_mutex_);
             if (undo_log_.empty()) {
                 return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
                                     "Nothing to undo");
             }
-            revert = std::move(undo_log_.back());
+            entry = std::move(undo_log_.back());
             undo_log_.pop_back();
         }
-        revert();
 
-        fillMutationResult(response, "Undo");
+        // The revert closure also emits the inverse type-specific event
+        // (e.g., TrackRenamed back to the old name).
+        entry.revert();
+
+        // Then announce the undo itself so the agent knows what just
+        // happened, with the original commit's id and description.
+        {
+            daw::v1::Event e;
+            auto* cu = e.mutable_command_undone();
+            cu->set_commit_id(entry.commit_id);
+            cu->set_description(entry.description);
+            emitEvent(std::move(e));
+        }
+
+        fillMutationResult(response, makeCommitId(), "Undo: " + entry.description);
         return grpc::Status::OK;
     }
 
@@ -476,7 +682,7 @@ public:
         if (aborted) {
             return grpc::Status(grpc::StatusCode::ABORTED, "Scan aborted by shutdown");
         }
-        fillMutationResult(response, "Rescanned plugins");
+        fillMutationResult(response, makeCommitId(), "Rescanned plugins");
         return grpc::Status::OK;
     }
 
@@ -556,16 +762,32 @@ public:
                                 "Plugin instantiation failed");
         }
 
+        const auto commit_id = makeCommitId();
+        const std::string track_id = track->itemID.toString().toStdString();
+        const std::string instance_id = plugin->itemID.toString().toStdString();
+        const std::string description = "Added plugin: " + plugin->getName().toStdString();
+
+        {
+            daw::v1::Event e;
+            auto* pa = e.mutable_plugin_added();
+            pa->set_plugin_instance_id(instance_id);
+            pa->set_track_id(track_id);
+            emitEvent(std::move(e));
+        }
+
         // Capture the plugin we just inserted; revert removes it from its
         // parent. Same callAsync-based dispatch as the instantiation —
         // AU teardown has the same async-dispatch sensitivities as init.
-        pushUndo([plugin] {
+        pushUndo(commit_id, description, [this, plugin, instance_id] {
             runOnMessageThreadSync([plugin] { plugin->removeFromParent(); });
+            daw::v1::Event e;
+            e.mutable_plugin_removed()->set_plugin_instance_id(instance_id);
+            emitEvent(std::move(e));
         });
 
-        response->set_plugin_instance_id(plugin->itemID.toString().toStdString());
-        fillMutationResult(response->mutable_mutation(),
-                           "Added plugin: " + plugin->getName().toStdString());
+        emitCommandApplied(commit_id, description);
+        response->set_plugin_instance_id(instance_id);
+        fillMutationResult(response->mutable_mutation(), commit_id, description);
         return grpc::Status::OK;
     }
 
@@ -606,6 +828,9 @@ public:
         // Same capture-replay pattern as SetTrackVolume. We always store
         // the native value (setParameter takes native) regardless of which
         // oneof case the request used.
+        const auto commit_id = makeCommitId();
+        const std::string instance_id = request->plugin_instance_id();
+        const std::string param_id = request->param_id();
         const float beforeValue = param->getCurrentValue();
         bool valueWasSet = false;
         runOnMessageThread([&] {
@@ -623,17 +848,70 @@ public:
             }
         });
 
-        // Only log an undo if we actually changed something — otherwise we'd
-        // pollute the stack with a no-op revert.
+        const std::string description = "Set " + param->getParameterName().toStdString();
+
         if (valueWasSet) {
-            pushUndo([param, beforeValue] {
+            const float afterValue = param->getCurrentValue();
+            {
+                daw::v1::Event e;
+                auto* pp = e.mutable_plugin_param_changed();
+                pp->set_plugin_instance_id(instance_id);
+                pp->set_param_id(param_id);
+                pp->set_new_value(afterValue);
+                emitEvent(std::move(e));
+            }
+
+            pushUndo(commit_id, description, [this, param, instance_id, param_id, beforeValue] {
                 runOnMessageThread([&] {
                     param->setParameter(beforeValue, juce::sendNotification);
                 });
+                daw::v1::Event e;
+                auto* pp = e.mutable_plugin_param_changed();
+                pp->set_plugin_instance_id(instance_id);
+                pp->set_param_id(param_id);
+                pp->set_new_value(beforeValue);
+                emitEvent(std::move(e));
             });
-        }
 
-        fillMutationResult(response, "Set " + param->getParameterName().toStdString());
+            emitCommandApplied(commit_id, description);
+        }
+        // Only log an undo if we actually changed something — otherwise we'd
+        // pollute the stack with a no-op revert.
+
+        fillMutationResult(response, commit_id, description);
+        return grpc::Status::OK;
+    }
+
+    // -------- Events --------
+
+    grpc::Status SubscribeEvents(grpc::ServerContext* context,
+                                 const daw::v1::EventFilter* request,
+                                 grpc::ServerWriter<daw::v1::Event>* writer) override {
+        auto sub = broadcaster_.subscribe(*request);
+
+        // Per-event poll loop. Wakes on either (a) a new event in the queue
+        // (via cv.notify_one inside broadcaster.broadcast), or (b) the 200ms
+        // timeout, which is how we re-check ctx->IsCancelled and the global
+        // shutdown flag without the broadcaster having to know about either.
+        // Subscriber teardown is implicit: we hold the only shared_ptr to the
+        // Subscription, and when this function returns the broadcaster's weak
+        // ref expires.
+        while (! context->IsCancelled() && ! g_shutdown_requested.load()) {
+            daw::v1::Event evt;
+            bool got = false;
+            {
+                std::unique_lock<std::mutex> lock(sub->queue_mutex);
+                sub->cv.wait_for(lock, std::chrono::milliseconds(200), [&] {
+                    return ! sub->queue.empty();
+                });
+                if (! sub->queue.empty()) {
+                    evt = std::move(sub->queue.front());
+                    sub->queue.pop_front();
+                    got = true;
+                }
+            }
+            if (got && ! writer->Write(evt)) break;  // client disconnected
+        }
         return grpc::Status::OK;
     }
 
@@ -663,17 +941,48 @@ private:
     // Bounded so a long-running session doesn't grow unbounded; older
     // entries are dropped (and become un-undoable). 100 is plenty for v1.
     static constexpr size_t kMaxUndoEntries = 100;
-    std::mutex undo_log_mutex_;
-    std::deque<std::function<void()>> undo_log_;
 
-    void pushUndo(std::function<void()> revert) {
+    struct UndoEntry {
+        std::string commit_id;       // of the original mutation
+        std::string description;     // shown in CommandUndone payload
+        std::function<void()> revert; // does revert + emits inverse type-specific event
+    };
+    std::mutex undo_log_mutex_;
+    std::deque<UndoEntry> undo_log_;
+
+    void pushUndo(std::string commit_id, std::string description,
+                  std::function<void()> revert) {
         std::lock_guard<std::mutex> lock(undo_log_mutex_);
-        undo_log_.push_back(std::move(revert));
+        undo_log_.push_back({std::move(commit_id), std::move(description), std::move(revert)});
         while (undo_log_.size() > kMaxUndoEntries) {
             undo_log_.pop_front();
         }
     }
 
+    // Build a CommandApplied event and broadcast it. The type-specific event
+    // (TrackRenamed, etc.) is emitted by the handler itself so the caller
+    // controls its exact contents; this helper just emits the bookkeeping
+    // event the agent uses for "what just happened?".
+    void emitCommandApplied(const std::string& commit_id, const std::string& description) {
+        daw::v1::Event e;
+        e.set_event_id(makeCommitId());
+        auto* ca = e.mutable_command_applied();
+        ca->set_commit_id(commit_id);
+        ca->set_description(description);
+        ca->set_source("agent");  // we don't distinguish user vs agent yet
+        broadcaster_.broadcast(e);
+    }
+
+    void emitEvent(daw::v1::Event e) {
+        if (e.event_id().empty()) e.set_event_id(makeCommitId());
+        broadcaster_.broadcast(e);
+    }
+
+public:
+    EventBroadcaster& broadcaster() { return broadcaster_; }
+
+private:
+    EventBroadcaster broadcaster_;
     te::Engine& engine_;
     te::Edit& edit_;
 };
@@ -753,6 +1062,11 @@ int main(int argc, char** argv) {
     // Flush any pending property writes (notably the plugin scan cache) so
     // they're durable before we exit.
     engine.getPropertyStorage().getPropertiesFile().saveIfNeeded();
+
+    // Wake any blocked SubscribeEvents handler threads so they re-check
+    // g_shutdown_requested and return — otherwise server->Shutdown() waits
+    // on them and we hang for up to 200ms per subscriber.
+    service.broadcaster().wakeAll();
 
     server->Shutdown();
     grpc_thread.join();

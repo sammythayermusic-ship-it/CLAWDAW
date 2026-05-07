@@ -4,6 +4,68 @@ Append-only log of each work session. Newest at the top.
 
 ---
 
+## 2026-05-06 (continued) — SubscribeEvents: streaming RPC, event broadcaster, per-mutation events ✅
+
+**Goal:** Implement `SubscribeEvents`, the first server-streaming RPC. The proto's event taxonomy already covers track / plugin / command lifecycle events; wire each mutation to emit the right ones so an agent or UI can stay in sync without polling.
+
+**Outcome:** Working. 13 RPCs now (12 unary + 1 streaming). Verified with multiple concurrent subscribers, filtered subscriptions (`event_types: ["command_applied"]`), and a full mutation+undo cycle that produced 10 events (5 type-specific + 5 command-tracking).
+
+### What was built
+
+- `EventBroadcaster` class in [engine/src/main.cc](engine/src/main.cc): a registry of `weak_ptr<Subscription>`, where each `Subscription` owns its own bounded queue + condition variable + filter. `broadcast(Event)` snapshots live subscriptions, applies each one's filter, pushes to its queue, notifies its cv. Slow consumers get oldest-event eviction at 1024 entries (no blocking). No explicit `unsubscribe` — when the SubscribeEvents handler returns, the strong ref drops and broadcast skips the expired weak.
+- `SubscribeEvents(EventFilter, ServerWriter<Event>)` handler: registers a subscription, polls its queue with a 200ms `cv.wait_for` so it can re-check `ctx->IsCancelled()` and `g_shutdown_requested` between events. Returns `OK` on clean shutdown or client disconnect.
+- Helpers: `eventTypeName(Event)`, `eventTrackId(Event)`, `matchesFilter(Event, EventFilter)`. Filter supports both `event_types` (matched against the oneof case name) and `track_ids` (checked against the event's track scope; events without a track scope pass through regardless).
+- `pushUndo` extended to take `(commit_id, description, revert_fn)`. The undo log entry now stores those three so `CommandUndone` can carry the original commit's metadata. Each revert closure also emits its own inverse type-specific event so streaming subscribers see the reversion.
+- All five mutating handlers updated:
+  - **RenameTrack** → `TrackRenamed{track_id, new_name}` + `CommandApplied`. Undo emits the inverse `TrackRenamed` (back to old name) + `CommandUndone`.
+  - **SetTrackVolume / SetTrackPan** → `TrackMixerChanged{track_id}` + `CommandApplied`. Undo emits `TrackMixerChanged` again with the old state visible via a fresh `GetTrack`.
+  - **AddPlugin** → `PluginAdded{plugin_instance_id, track_id}` + `CommandApplied`. Undo runs `removeFromParent()` and emits `PluginRemoved{plugin_instance_id}` + `CommandUndone`.
+  - **SetPluginParameter** → `PluginParamChanged{plugin_instance_id, param_id, new_value}` + `CommandApplied`. Undo replays with the captured before-value and emits another `PluginParamChanged`.
+- Shutdown plumbing: `main()` now calls `service.broadcaster().wakeAll()` before `server->Shutdown()` so subscriber threads unblock from their cv wait and return immediately, instead of waiting on the 200ms poll timeout.
+
+### Verification
+
+```
+# Subscribe with a filter (only command_applied events)
+grpcurl -plaintext -d '{"event_types":["command_applied"]}' :50093 daw.v1.Engine/SubscribeEvents
+# (running in background)
+
+# Then mutate
+RenameTrack Bass    → trackRenamed + commandApplied
+SetTrackVolume -3   → trackMixerChanged + commandApplied
+AddPlugin AUVP      → pluginAdded + commandApplied
+SetPluginParameter  → pluginParamChanged + commandApplied
+
+# Filtered subscriber sees only the 4 commandApplied events.
+# Unfiltered subscriber sees all 8.
+
+# Now Undo twice:
+Undo                → pluginParamChanged (back to before) + commandUndone
+Undo                → pluginRemoved + commandUndone
+# Each commandUndone carries the commit_id of the original mutation.
+```
+
+Multiple concurrent subscribers each get their own queue and filter; a mid-session subscriber doesn't see historical events (no replay buffer).
+
+### Known limitations
+
+- **No event replay.** A subscriber that connects after a mutation doesn't see it. v2: consider a small ring buffer of recent events that new subscribers replay. Most use cases (UI staying in sync, agent reacting to user actions) work fine without replay; an agent can always call `GetProject` or `GetTrack` to seed its view.
+- **No `RescanPlugins` progress events.** The proto doesn't have a scan-progress event type, so we'd need to either add one (breaks proto v1 lock) or piggyback on `CommandApplied`. Deferred — stderr logs are good enough for the CLI client today.
+- **`new_value` for plugin param events is the parameter's native value.** Subscribers that want normalized would have to look up the parameter's range separately. Acceptable; matches the field name in the proto.
+- **Subscriber queue overflow drops oldest events.** 1024-event cap. Not really hit in practice but documented.
+- **No source distinction.** All `CommandApplied` events have `source: "agent"`. We don't yet distinguish user vs agent-initiated commands. v2 fodder — would need an explicit caller-identity surface.
+
+### Repo state
+
+- [engine/src/main.cc](engine/src/main.cc): up to ~1070 lines now. Adding the broadcaster + per-handler event emission was about 250 lines net. Definitely time to refactor into per-area files in a future session.
+- No CMake changes. Existing protobuf stubs already had `SubscribeEvents`/`Event` (proto contract was complete; we just hadn't implemented the streaming side yet).
+
+### Time spent
+
+~1.5 hours. The broadcaster design landed cleanly on the first try thanks to the shared_ptr/weak_ptr lifetime trick (no explicit unsubscribe). Most of the time was in the per-handler event emission — five mutations × (forward event + inverse undo event + commit-id wiring) = a lot of small edits. No surprises.
+
+---
+
 ## 2026-05-06 (continued) — Undo bridge: Tracktion's UndoManager replaced with our own LIFO log ✅
 
 **Goal:** Close the documented parameter-undo gap. Make `SetTrackVolume`, `SetTrackPan`, `SetPluginParameter` actually undoable so a sequence of mutations of any kind walks back to the starting state via repeated `Undo` calls.
