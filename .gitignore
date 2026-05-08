@@ -13,6 +13,9 @@ DerivedData/
 .idea/
 *.swp
 
+# Claude Code agent state — worktrees, session caches.
+.claude/
+
 # Vendored Tracktion Engine + JUCE source. Currently extracted from tarballs;
 # will become git submodules when network cooperates. Setup steps live in
 # docs/session-log.md.
