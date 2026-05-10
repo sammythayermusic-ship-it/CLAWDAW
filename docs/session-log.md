@@ -4,6 +4,109 @@ Append-only log of each work session. Newest at the top.
 
 ---
 
+## 2026-05-09 — Phase 3 design tokens: warm-light palette extracted from hero prototypes ✅
+
+**Goal:** Translate the chosen hero prototype images into a real design token set that the upcoming Phase 3 Tauri UI will be built on. Token-extraction only — no Tauri scaffold, no build system, no other UI files (those are explicitly the next session).
+
+**Outcome:** Three files on main: `ui/src/design/tokens.ts` (188 lines, typed constants, passes `tsc --noEmit --strict`), `docs/design/tokens-rationale.md` (provenance per token group), and `docs/design/token-preview.html` (static visual smoke-test page, no toolchain).
+
+### Heroes
+
+Sammy picked two heroes from the warm-light prototype set in `docs/design/prototypes/`:
+
+- **`clawdaw_main_arrangement.png`** — establishing layout. Source of background gradient, surface tints, text hierarchy, agent indicator, panel radii.
+- **`clawdaw_transport_detail.png`** — slot-machine showcase. Source of tactile control surfaces, accent gold, meter gradient, peak-hold dot, large mono readouts.
+
+These two together cover the entire warm-light token surface area with no overlap.
+
+### How tokens were extracted
+
+Hex values were pixel-sampled at full 5504×3072 resolution, not eyeballed. Pillow + numpy with a per-region masking strategy:
+
+- **Cream pill body**: detect pixels where R≈G+10, R-B≈18, then take the median.
+- **Coral record button**: detect saturated coral (R-G > 35, R-B > 50) within the record-button bbox, then take mid-luma 30% for the face and most-saturated 10% for the inner dot.
+- **Meter teal/amber/rose**: detect cool pixels (G > R AND B > R) in the meter bbox bottom for `meter.low`; warm pixels (R > G+5, G > B+10) in the middle for `meter.mid`; warm rose (R > 220, R-G > 30, R-B > 30) at the top for `meter.high`.
+- **Background gradient stops**: thin edge strips at the four corners, simple mean.
+- **Text colors**: darkest 80–200 pixels in a labeled region, averaged.
+- **Glass edge highlight**: brightest 200 pixels in a 6px-tall strip at the top of the cream pill.
+
+The candidate values clustered tightly across multiple sample spots within each region — that consistency is what gives confidence the values are the *actual* color and not anti-aliased fringe.
+
+### Final token shape
+
+```
+color
+  background:     glow / warm / deep / shadow      (4-stop diagonal gradient)
+  surface:        glass / glassRaised / glassEdge / glassInnerShadow
+  text:           primary / secondary / tertiary
+  accent:         active / hover                    (warm gold family)
+  meter:          low / mid / high / peakHold       (sage / amber / coral / pale gold)
+  agentIndicator:                                   (soft cream-gold pebble)
+typography
+  family:         display / text / mono             (SF Pro Display / Text / Mono)
+  scale:          7 entries — display, h1, h2, body, label, monoReadout, monoBody
+                  (brief listed 6; monoBody added because plugin-chain inline readouts
+                  need a smaller mono than the 56px transport readouts. Flagged in
+                  rationale.md for review.)
+radii:            control 10 / card 16 / panel 20 / pill 9999
+glass:            blurPx 24 / surfaceAlpha 0.85 / edgeHighlight rgba / innerShadow rgba
+space:            4-base scale, px1..px16
+motion:           durations (hover/press/panelSlide/ambient) + easings (standard/spring/gentle)
+elevation:        rest / hover / active             (warm-tinted, NOT neutral black)
+```
+
+Warmth audit: 22 of 23 color values have R-B ≥ +18 (warm tilt). The lone exception is `meter.low #6C8B8C` — that's intentionally cool because it's the dusty sage at the bottom of the meter (the "green" in the brief's "green/amber/red" framing). The prototype's meter low really is a dusty sage/teal, not a green.
+
+### Verification
+
+- **`tsc --noEmit --strict`** on `tokens.ts` exits 0.
+- **Visual smoke test** via `docs/design/token-preview.html`. The page paints every token at scale on the actual gradient background — color swatches, type specimens, transport-pill reconstruction, meter, glass material, radii, elevation, agent indicator, spacing. Read alongside the prototype PNGs; mismatch ⇒ token bug. The transport-pill reconstruction matches the prototype's slot-machine moment closely (cream pill, round play with inner gold glow, square stop, coral record, mono digits, mini meter, "−2.4 dB" master readout).
+
+To open: serve the file directly (`npx --yes serve docs/design --listen 8765` → http://localhost:8765/token-preview) or open the HTML file in a browser. No JS, no external assets.
+
+### Adherence corrections during the session
+
+- **`color.agentIndicator`** was initially sampled from `clawdaw_agent_open.png` (the active agent state). The brief explicitly limits extraction to "the chosen heroes" → re-sampled from `clawdaw_main_arrangement.png` (idle pebble at top-right). Final value `#F0DBBF`.
+- **Swatch readability bug** in the preview page: `.dark`/`.light` ink classes were inverted, making 12+ swatches unreadable. Fixed by renaming to `ink-dark`/`ink-light` with explicit "dark glyphs on light swatch" semantics.
+- **Auto dark-mode interference** with the preview page: in dark-mode browsers the html default bg showed through as a black band at the top of the gradient. Fixed with `<meta name="color-scheme" content="light">`.
+
+### Known limitations / open decisions
+
+- **`monoBody` 7th type-scale entry.** Brief listed 6 entries (display/h1/h2/body/label/mono-readout). I added `monoBody` (13px) because plugin-chain inline readouts ("−3.2 dB GR", "sat 35%") need a smaller mono than the 56px transport readouts. Could be removed if you want strict adherence to the brief.
+- **No dark-mode tokens.** Brief specified warm-light only. Dark variants exist in the prototype set (`clawdaw_*_dark.png`) and should be a separate session against those images.
+- **No `destructive`/`record` accent category.** The coral record button uses the same family as `meter.high` (sampled face `#E59B85`, inner dot `#CA624C` — both within the `#C17D7A` rose family). When wiring up a record control, implement it via `meter.high` plus a brighter highlight rather than introducing a new top-level token. Documented in tokens-rationale.md.
+- **`meter.low #6C8B8C` lone cool token.** Sampled correctly — the prototype renders the meter bottom as dusty sage. If a future review wants it warmer, candidate is `#8B9A8A` (less green, more taupe-sage).
+- **Token preview values are mirrored manually from `tokens.ts`.** The HTML file has no toolchain, so tokens live as CSS custom properties. If `tokens.ts` changes, both files must be updated. Fine for a smoke test; if drift becomes an issue, add a generator script.
+
+### Untracked files on main (separate cleanup item)
+
+After the merge, main still has untracked files from the previous prototype-generation session:
+
+- `docs/design-prototype-prompt.md` — the brief that drove prototype generation (small markdown).
+- `docs/design/prototypes/` — the 15 hero PNGs at ~300 MB total + `captions.md`.
+
+These are referenced by `tokens-rationale.md`. Unresolved options:
+1. Commit them (300 MB of binary; would benefit from Git LFS).
+2. `.gitignore` them and document in rationale.md that prototypes live outside git.
+
+Decide before someone clones the repo and finds the rationale doc references images they can't see.
+
+### Repo state
+
+- 4 commits on `claude/dazzling-mendeleev-951f13`, merged into main as `7f2bbea` via `--no-ff`.
+- New files: `ui/src/design/tokens.ts`, `docs/design/tokens-rationale.md`, `docs/design/token-preview.html`. Touched no other files.
+- No engine, agent, or proto changes in this session.
+
+### Next session
+
+Phase 3 Tauri scaffold: Tauri 2 + React + TypeScript + pnpm, gRPC-Web client to `clawdaw_engine`, `SubscribeEvents` wired to a state store. Build the first three panels (track list, transport bar, plugin chain view) consuming `tokens.ts`. The preview page is the visual reference; the engine is already serving the 13 RPCs needed.
+
+### Time spent
+
+~1.5 hours. Most of it in iterative pixel sampling (4 passes to get the meter teal isolated cleanly from the cream pill bleeding into the bar edges). The TypeScript file itself was straightforward once the values were in hand.
+
+---
+
 ## 2026-05-06 (continued) — SubscribeEvents: streaming RPC, event broadcaster, per-mutation events ✅
 
 **Goal:** Implement `SubscribeEvents`, the first server-streaming RPC. The proto's event taxonomy already covers track / plugin / command lifecycle events; wire each mutation to emit the right ones so an agent or UI can stay in sync without polling.
