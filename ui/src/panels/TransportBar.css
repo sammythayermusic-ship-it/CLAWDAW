@@ -1,0 +1,163 @@
+/* Slot-machine transport pill, mirroring docs/design/token-preview.html
+   §4 ("transport pill"). Every value comes from a CSS custom property. */
+
+.transport-bar {
+  display: flex;
+  justify-content: center;
+  padding: var(--space-px2) 0;
+}
+
+.transport-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-px4);
+  padding: var(--space-px3) var(--space-px5);
+  border-radius: var(--radius-pill);
+  background-color: rgb(from var(--color-surface-glass) r g b / 0.88);
+  backdrop-filter: blur(var(--glass-blur)) saturate(1.05);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.05);
+  box-shadow:
+    inset 0 1px 0 var(--glass-edge-highlight),
+    var(--glass-inner-shadow),
+    var(--elevation-rest);
+}
+
+.transport-buttons {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-px3);
+}
+
+/* Base pebble. Each button overrides shape/color below. */
+.transport-btn {
+  width: 56px;
+  height: 56px;
+  border: none;
+  cursor: pointer;
+  background-color: var(--color-surface-glass-raised);
+  color: var(--color-text-primary);
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-control);
+  box-shadow:
+    inset 0 1px 0 var(--glass-edge-highlight),
+    var(--elevation-rest);
+  transition:
+    transform var(--motion-press) var(--ease-spring),
+    box-shadow var(--motion-hover) var(--ease-standard),
+    background-color var(--motion-hover) var(--ease-gentle);
+}
+
+.transport-btn:hover {
+  transform: translateY(-1px);
+  background-color: var(--color-accent-hover);
+  box-shadow:
+    inset 0 1px 0 var(--glass-edge-highlight),
+    var(--elevation-hover);
+}
+
+.transport-btn:active {
+  transform: translateY(0) scale(0.98);
+  box-shadow: var(--elevation-active);
+}
+
+.transport-btn--play {
+  border-radius: 50%;
+  /* Inner gold glow gives the play button its "ready" energy. */
+  box-shadow:
+    inset 0 0 18px rgb(from var(--color-accent-active) r g b / 0.6),
+    inset 0 1px 0 var(--glass-edge-highlight),
+    var(--elevation-rest);
+}
+
+.transport-btn--play:hover {
+  box-shadow:
+    inset 0 0 22px rgb(from var(--color-accent-active) r g b / 0.75),
+    inset 0 1px 0 var(--glass-edge-highlight),
+    var(--elevation-hover);
+}
+
+.transport-btn--stop {
+  border-radius: var(--radius-control);
+}
+
+.transport-btn--record {
+  border-radius: var(--radius-control);
+  background-color: var(--color-meter-high);
+  color: var(--color-text-primary);
+}
+
+.transport-btn--record:hover {
+  background-color: var(--color-accent-hover);
+}
+
+.transport-divider {
+  width: 1px;
+  height: 36px;
+  background-color: rgb(from var(--color-text-primary) r g b / 0.10);
+}
+
+.transport-readout {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  min-width: 64px;
+}
+
+.transport-readout-digits {
+  font-family: var(--font-mono);
+  font-size: 36px;
+  font-weight: 500;
+  line-height: 1;
+  color: var(--color-text-primary);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.005em;
+}
+
+.transport-readout-digits--small {
+  font-size: 18px;
+}
+
+.transport-readout-label {
+  font-family: var(--font-text);
+  font-size: calc(var(--type-label-size) * 1px);
+  font-weight: var(--type-label-weight);
+  letter-spacing: var(--type-label-tracking);
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+.transport-readout--small {
+  min-width: 48px;
+}
+
+.transport-meter {
+  display: flex;
+  gap: 4px;
+  align-items: flex-end;
+  height: 48px;
+}
+
+.transport-meter-bar {
+  width: 8px;
+  border-radius: var(--radius-pill);
+  background: linear-gradient(
+    to top,
+    var(--color-meter-low) 0%,
+    var(--color-meter-mid) 50%,
+    var(--color-meter-high) 100%
+  );
+  /* Subtle peak-hold-style highlight at the top of each bar. */
+  box-shadow:
+    inset 0 1px 0 var(--glass-edge-highlight),
+    inset 0 -1px 2px rgb(from var(--color-text-primary) r g b / 0.10);
+}
+
+.transport-meter-bar--full {
+  height: 100%;
+}
+
+.transport-meter-bar--80 {
+  height: 80%;
+}

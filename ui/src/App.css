@@ -1,25 +1,52 @@
+/* App-shell grid:
+   row 1: titlebar (brand pebble + connection pill)
+   row 2: TransportBar (the hero pill, centered)
+   row 3: TrackList | PluginChain — left rail fixed-ish, right rail flexes
+
+   The whole shell sits on the warm gradient set in styles.css. */
+
 .app-shell {
   width: 100%;
   height: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-px6);
-  padding: var(--space-px8);
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  gap: var(--space-px5);
+  padding: var(--space-px5) var(--space-px8) var(--space-px8);
+  min-height: 0;
 }
 
-.app-header {
+/* ---------- Titlebar (brand + connection pill) ---------- */
+.app-titlebar {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: var(--space-px4);
 }
 
-.app-title {
+.app-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-px3);
+}
+
+/* Soft warm cream-gold pebble — same recipe as token-preview §8.
+   Goes here at the title bar to suggest the agent's idle presence. */
+.app-agent-pebble {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-control);
+  background-color: var(--color-agent-indicator);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.5),
+    0 0 18px rgb(from var(--color-agent-indicator) r g b / 0.45),
+    var(--elevation-rest);
+}
+
+.app-brand-label {
   font-family: var(--font-display);
-  font-size: calc(var(--type-display-size) * 1px);
-  font-weight: var(--type-display-weight);
-  line-height: var(--type-display-line-height);
-  letter-spacing: var(--type-display-tracking);
+  font-size: calc(var(--type-h1-size) * 1px);
+  font-weight: var(--type-h1-weight);
+  letter-spacing: var(--type-h1-tracking);
   color: var(--color-text-primary);
 }
 
@@ -60,56 +87,12 @@
   50%      { opacity: 1.0; }
 }
 
-.app-track-list {
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-px2);
-  margin: 0;
-  padding: 0;
-}
-
-.app-track-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: var(--space-px3) var(--space-px5);
-  border-radius: var(--radius-card);
-  background-color: rgb(from var(--color-surface-glass) r g b / var(--glass-surface-alpha));
-  backdrop-filter: blur(var(--glass-blur)) saturate(1.05);
-  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.05);
-  box-shadow:
-    inset 0 1px 0 var(--glass-edge-highlight),
-    var(--glass-inner-shadow),
-    var(--elevation-rest);
-  transition: transform var(--motion-hover) var(--ease-standard),
-              box-shadow var(--motion-hover) var(--ease-standard);
-}
-
-.app-track-row:hover {
-  box-shadow:
-    inset 0 1px 0 var(--glass-edge-highlight),
-    var(--glass-inner-shadow),
-    var(--elevation-hover);
-}
-
-.app-track-name {
-  font-family: var(--font-text);
-  font-size: calc(var(--type-h2-size) * 1px);
-  font-weight: var(--type-h2-weight);
-  letter-spacing: var(--type-h2-tracking);
-  color: var(--color-text-primary);
-}
-
-.app-track-meta {
-  font-family: var(--font-mono);
-  font-size: calc(var(--type-monoBody-size) * 1px);
-  letter-spacing: var(--type-monoBody-tracking);
-  color: var(--color-text-secondary);
-}
-
-.app-track-empty {
-  color: var(--color-text-tertiary);
-  font-size: calc(var(--type-body-size) * 1px);
-  font-style: italic;
+/* ---------- Rails (TrackList | PluginChain) ----------
+   minmax(220px, 320px) for the left rail keeps the track names readable
+   without crowding the plugin chain. PluginChain takes the rest. */
+.app-rails {
+  display: grid;
+  grid-template-columns: minmax(220px, 320px) 1fr;
+  gap: var(--space-px5);
+  min-height: 0;
 }
