@@ -78,18 +78,11 @@ To open: serve the file directly (`npx --yes serve docs/design --listen 8765` �
 - **`meter.low #6C8B8C` lone cool token.** Sampled correctly — the prototype renders the meter bottom as dusty sage. If a future review wants it warmer, candidate is `#8B9A8A` (less green, more taupe-sage).
 - **Token preview values are mirrored manually from `tokens.ts`.** The HTML file has no toolchain, so tokens live as CSS custom properties. If `tokens.ts` changes, both files must be updated. Fine for a smoke test; if drift becomes an issue, add a generator script.
 
-### Untracked files on main (separate cleanup item)
+### Prototype set + brief committed (followup, same day)
 
-After the merge, main still has untracked files from the previous prototype-generation session:
+After the token merge, the previous-session artifacts (`docs/design-prototype-prompt.md`, `docs/design/prototypes/captions.md`, and the 15 hero PNGs ~300 MB) were still untracked. Sammy chose option 1: commit them as regular blobs on main (commit `0c3863b`). Future cleanup: migrate to Git LFS before pushing to a remote — 300 MB of binary in the working tree is fine, but a network push will be slow without LFS.
 
-- `docs/design-prototype-prompt.md` — the brief that drove prototype generation (small markdown).
-- `docs/design/prototypes/` — the 15 hero PNGs at ~300 MB total + `captions.md`.
-
-These are referenced by `tokens-rationale.md`. Unresolved options:
-1. Commit them (300 MB of binary; would benefit from Git LFS).
-2. `.gitignore` them and document in rationale.md that prototypes live outside git.
-
-Decide before someone clones the repo and finds the rationale doc references images they can't see.
+The `tokens-rationale.md` references in this entry now point at committed artifacts, not floating files.
 
 ### Repo state
 
