@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CLAWDAW · token preview</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light"><!-- opt out of auto dark mode; the warm palette is intentionally light -->
+<!--
+  Smoke test for ui/src/design/tokens.ts. Open in a browser and compare
+  against docs/design/prototypes/clawdaw_transport_detail.png and
+  clawdaw_main_arrangement.png side by side.
+
+  Token values below are mirrored from tokens.ts. If tokens.ts changes,
+  update this file too — it is intentionally not built (no toolchain),
+  so drift detection is by eye for now.
+-->
+<style>
+  :root {
+    /* ---- color ---- */
+    --bg-glow:    #F5CD9D;
+    --bg-warm:    #E5A78A;
+    --bg-deep:    #D89382;
+    --bg-shadow:  #836769;
+
+    --surface-glass:        #EADFD5;
+    --surface-glass-raised: #F2DFD8;
+    --surface-glass-edge:   #F5E8DC;
+    --surface-glass-shadow: #DDCDBD;
+
+    --text-primary:   #2A1A18;
+    --text-secondary: #6B554A;
+    --text-tertiary:  #A1857A;
+
+    --accent-active: #E8B886;
+    --accent-hover:  #F2D7B5;
+
+    --meter-low:      #6C8B8C;
+    --meter-mid:      #DAAB82;
+    --meter-high:     #C17D7A;
+    --meter-peakhold: #FAE1BB;
+
+    --agent-indicator: #F0DBBF;
+
+    /* ---- glass ---- */
+    --glass-blur: 24px;
+    --glass-edge-highlight: rgba(255, 248, 230, 0.55);
+    --glass-inner-shadow: rgba(60, 40, 38, 0.10);
+
+    /* ---- radii ---- */
+    --r-control: 10px;
+    --r-card: 16px;
+    --r-panel: 20px;
+    --r-pill: 9999px;
+
+    /* ---- spacing ---- */
+    --s1:  4px; --s2:  8px; --s3: 12px; --s4: 16px;
+    --s5: 20px; --s6: 24px; --s8: 32px; --s10: 40px;
+    --s12: 48px; --s16: 64px;
+
+    /* ---- motion ---- */
+    --ease-standard: cubic-bezier(0.32, 0.72, 0.00, 1.00);
+    --ease-spring:   cubic-bezier(0.50, 1.60, 0.40, 0.95);
+    --ease-gentle:   cubic-bezier(0.40, 0.00, 0.20, 1.00);
+    --d-hover: 120ms;
+    --d-press:  80ms;
+    --d-panel: 320ms;
+
+    /* ---- elevation ---- */
+    --elev-rest:   0 2px  8px rgba(60, 30, 21, 0.08);
+    --elev-hover:  0 6px 18px rgba(60, 30, 21, 0.12);
+    --elev-active: inset 0 1px 3px rgba(60, 30, 21, 0.10);
+
+    /* font stacks */
+    --ff-display: 'SF Pro Display', -apple-system, BlinkMacSystemFont, sans-serif;
+    --ff-text:    'SF Pro Text', -apple-system, BlinkMacSystemFont, sans-serif;
+    --ff-mono:    'SF Mono', ui-monospace, Menlo, monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    min-height: 100vh;
+    /* The hero gradient: NW (deep dusty plum) -> SE (peach gold). */
+    background:
+      linear-gradient(135deg,
+        var(--bg-shadow) 0%,
+        var(--bg-deep)   33%,
+        var(--bg-warm)   66%,
+        var(--bg-glow)   100%);
+    background-attachment: fixed;
+    font-family: var(--ff-text);
+    font-size: 15px;
+    line-height: 1.45;
+    color: var(--text-primary);
+  }
+
+  main { max-width: 1100px; margin: 0 auto; padding: var(--s10) var(--s8) var(--s16); }
+  h1 { font-family: var(--ff-display); font-size: 56px; font-weight: 600; letter-spacing: -0.022em; line-height: 1.05; margin: 0 0 var(--s2); }
+  h2 { font-family: var(--ff-display); font-size: 24px; font-weight: 500; letter-spacing: -0.012em; line-height: 1.22; margin: var(--s10) 0 var(--s4); }
+  p.lede { color: var(--text-secondary); margin: 0 0 var(--s10); max-width: 60ch; }
+
+  /* ---- glass panel container ---- */
+  .panel {
+    background: rgb(234 223 213 / 0.85);
+    backdrop-filter: blur(var(--glass-blur)) saturate(1.05);
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.05);
+    border-radius: var(--r-panel);
+    box-shadow:
+      inset 0 1px 0 var(--glass-edge-highlight),
+      inset 0 -1px 2px var(--glass-inner-shadow),
+      var(--elev-rest);
+    padding: var(--s6);
+  }
+
+  /* ---- swatch grid ---- */
+  .swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: var(--s4); }
+  .swatch {
+    border-radius: var(--r-card);
+    padding: var(--s3) var(--s4);
+    box-shadow: inset 0 1px 0 var(--glass-edge-highlight), var(--elev-rest);
+    height: 96px;
+    display: flex; flex-direction: column; justify-content: flex-end;
+  }
+  .swatch .name { font-family: var(--ff-mono); font-size: 11px; letter-spacing: 0.04em; font-weight: 500; }
+  .swatch .hex  { font-family: var(--ff-mono); font-size: 11px; opacity: 0.65; }
+  /* "ink-dark" = dark glyphs on a light swatch; "ink-light" = light glyphs on a dark swatch. */
+  .swatch.ink-dark  .name, .swatch.ink-dark  .hex { color: var(--text-primary); }
+  .swatch.ink-light .name, .swatch.ink-light .hex { color: #F5E8DC; }
+
+  /* ---- type scale specimens ---- */
+  .type-row { display: grid; grid-template-columns: 160px 1fr; gap: var(--s6); align-items: baseline; padding: var(--s3) 0; border-bottom: 1px dashed rgb(42 26 24 / 0.10); }
+  .type-row:last-child { border-bottom: none; }
+  .type-row .label { font-family: var(--ff-mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-tertiary); }
+  .type-row .label small { display: block; opacity: 0.7; text-transform: none; letter-spacing: 0; }
+  .t-display { font-family: var(--ff-display); font-size: 56px; font-weight: 600; letter-spacing: -0.022em; line-height: 1.05; }
+  .t-h1      { font-family: var(--ff-display); font-size: 36px; font-weight: 600; letter-spacing: -0.018em; line-height: 1.15; }
+  .t-h2      { font-family: var(--ff-display); font-size: 24px; font-weight: 500; letter-spacing: -0.012em; line-height: 1.22; }
+  .t-body    { font-family: var(--ff-text);    font-size: 15px; font-weight: 400; line-height: 1.45; }
+  .t-label   { font-family: var(--ff-text);    font-size: 11px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; line-height: 1.30; }
+  .t-mono-readout { font-family: var(--ff-mono); font-size: 56px; font-weight: 500; letter-spacing: -0.005em; line-height: 1.0; font-variant-numeric: tabular-nums; }
+  .t-mono-body    { font-family: var(--ff-mono); font-size: 13px; font-weight: 400; line-height: 1.35; font-variant-numeric: tabular-nums; }
+
+  /* ---- meter strip (slot-machine showcase recreation) ---- */
+  .meter-pill {
+    width: 28px; height: 280px; border-radius: var(--r-pill);
+    background: linear-gradient(to top,
+      var(--meter-low)  0%,
+      var(--meter-low)  18%,
+      var(--meter-mid)  50%,
+      var(--meter-high) 88%,
+      var(--meter-high) 100%);
+    box-shadow: inset 0 1px 0 var(--glass-edge-highlight), inset 0 -1px 2px var(--glass-inner-shadow);
+    position: relative;
+  }
+  .meter-pill::before {
+    content: '';
+    position: absolute; left: 50%; top: 12%;
+    width: 12px; height: 12px; border-radius: var(--r-pill);
+    background: var(--meter-peakhold);
+    transform: translateX(-50%);
+    box-shadow: 0 0 8px rgb(250 225 187 / 0.6);
+  }
+
+  /* ---- transport pill recreation (slot-machine moment) ---- */
+  .transport {
+    display: inline-flex; align-items: center; gap: var(--s4);
+    padding: var(--s3) var(--s5);
+    background: rgb(234 223 213 / 0.88);
+    backdrop-filter: blur(var(--glass-blur)) saturate(1.05);
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.05);
+    border-radius: var(--r-pill);
+    box-shadow:
+      inset 0 1px 0 var(--glass-edge-highlight),
+      inset 0 -1px 2px var(--glass-inner-shadow),
+      var(--elev-rest);
+  }
+  .btn {
+    width: 56px; height: 56px; border: none; cursor: pointer;
+    background: var(--surface-glass-raised);
+    box-shadow:
+      inset 0 1px 0 var(--glass-edge-highlight),
+      var(--elev-rest);
+    transition:
+      transform var(--d-press) var(--ease-spring),
+      box-shadow var(--d-hover) var(--ease-standard),
+      background var(--d-hover) var(--ease-gentle);
+    display: grid; place-items: center;
+    color: var(--text-primary);
+  }
+  .btn:hover { transform: translateY(-1px); box-shadow: inset 0 1px 0 var(--glass-edge-highlight), var(--elev-hover); background: var(--accent-hover); }
+  .btn:active { transform: translateY(0) scale(0.98); box-shadow: var(--elev-active); }
+  .btn.play   { border-radius: 50%;             box-shadow: inset 0 0 18px rgb(232 184 134 / 0.6), inset 0 1px 0 var(--glass-edge-highlight), var(--elev-rest); }
+  .btn.stop   { border-radius: var(--r-control); }
+  .btn.record { border-radius: var(--r-control); background: var(--meter-high); }
+  .btn.record:hover { background: var(--accent-hover); }
+  .divider { width: 1px; height: 36px; background: rgb(42 26 24 / 0.10); }
+  .digit-group { display: flex; flex-direction: column; align-items: center; }
+  .digit-group .digits { font-family: var(--ff-mono); font-size: 36px; font-weight: 500; line-height: 1; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+  .digit-group .label  { font-family: var(--ff-text); font-size: 11px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-secondary); margin-top: 4px; }
+  .meter-mini { display: flex; gap: 4px; align-items: flex-end; height: 48px; }
+  .meter-mini .bar { width: 8px; height: 100%; border-radius: var(--r-pill); background: linear-gradient(to top, var(--meter-low) 0%, var(--meter-mid) 50%, var(--meter-high) 100%); }
+
+  /* ---- radii samples ---- */
+  .radii { display: flex; gap: var(--s5); align-items: flex-end; flex-wrap: wrap; }
+  .radii > div { width: 96px; height: 96px; background: var(--surface-glass-raised); box-shadow: inset 0 1px 0 var(--glass-edge-highlight), var(--elev-rest); display: grid; place-items: end; padding: var(--s3); font-family: var(--ff-mono); font-size: 11px; color: var(--text-secondary); }
+
+  /* ---- elevation samples ---- */
+  .elev-row { display: flex; gap: var(--s8); align-items: center; padding: var(--s6) 0; }
+  .elev-card {
+    width: 120px; height: 120px;
+    background: var(--surface-glass-raised);
+    border-radius: var(--r-card);
+    display: grid; place-items: center;
+    font-family: var(--ff-mono); font-size: 11px; letter-spacing: 0.04em;
+    color: var(--text-secondary);
+    transition: box-shadow var(--d-hover) var(--ease-standard), transform var(--d-press) var(--ease-spring);
+  }
+  .elev-rest   { box-shadow: inset 0 1px 0 var(--glass-edge-highlight), var(--elev-rest); }
+  .elev-hover  { box-shadow: inset 0 1px 0 var(--glass-edge-highlight), var(--elev-hover); transform: translateY(-2px); }
+  .elev-active { box-shadow: var(--elev-active); transform: translateY(0) scale(0.98); }
+
+  /* ---- spacing visualization ---- */
+  .spacing { display: flex; align-items: flex-end; gap: var(--s2); }
+  .spacing > div { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+  .spacing .bar { background: var(--text-primary); width: 18px; }
+  .spacing .name { font-family: var(--ff-mono); font-size: 10px; color: var(--text-secondary); }
+
+  /* ---- agent indicator pebble ---- */
+  .agent-pebble {
+    width: 56px; height: 56px;
+    border-radius: var(--r-control);
+    background: var(--agent-indicator);
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.5),
+      0 0 24px rgb(240 219 191 / 0.45),
+      var(--elev-rest);
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>token preview</h1>
+  <p class="lede">Smoke test for <code>ui/src/design/tokens.ts</code>. Compare alongside <code>prototypes/clawdaw_transport_detail.png</code> and <code>prototypes/clawdaw_main_arrangement.png</code>. Mismatch ⇒ token bug.</p>
+
+  <h2>1 · background gradient</h2>
+  <p class="lede">The page background is the gradient itself — bottom-left dusty plum to top-right peach gold. If your eye reads cold/gray anywhere, a stop is wrong.</p>
+
+  <h2>2 · color tokens</h2>
+  <div class="panel">
+    <div class="swatches">
+      <div class="swatch ink-dark"  style="background:#F5CD9D"><span class="name">bg.glow</span><span class="hex">#F5CD9D</span></div>
+      <div class="swatch ink-dark"  style="background:#E5A78A"><span class="name">bg.warm</span><span class="hex">#E5A78A</span></div>
+      <div class="swatch ink-light" style="background:#D89382"><span class="name">bg.deep</span><span class="hex">#D89382</span></div>
+      <div class="swatch ink-light" style="background:#836769"><span class="name">bg.shadow</span><span class="hex">#836769</span></div>
+
+      <div class="swatch ink-dark"  style="background:#EADFD5"><span class="name">surface.glass</span><span class="hex">#EADFD5</span></div>
+      <div class="swatch ink-dark"  style="background:#F2DFD8"><span class="name">surface.glassRaised</span><span class="hex">#F2DFD8</span></div>
+      <div class="swatch ink-dark"  style="background:#F5E8DC"><span class="name">surface.glassEdge</span><span class="hex">#F5E8DC</span></div>
+      <div class="swatch ink-dark"  style="background:#DDCDBD"><span class="name">surface.glassInnerShadow</span><span class="hex">#DDCDBD</span></div>
+
+      <div class="swatch ink-light" style="background:#2A1A18"><span class="name">text.primary</span><span class="hex">#2A1A18</span></div>
+      <div class="swatch ink-light" style="background:#6B554A"><span class="name">text.secondary</span><span class="hex">#6B554A</span></div>
+      <div class="swatch ink-light" style="background:#A1857A"><span class="name">text.tertiary</span><span class="hex">#A1857A</span></div>
+
+      <div class="swatch ink-dark"  style="background:#E8B886"><span class="name">accent.active</span><span class="hex">#E8B886</span></div>
+      <div class="swatch ink-dark"  style="background:#F2D7B5"><span class="name">accent.hover</span><span class="hex">#F2D7B5</span></div>
+
+      <div class="swatch ink-light" style="background:#6C8B8C"><span class="name">meter.low</span><span class="hex">#6C8B8C</span></div>
+      <div class="swatch ink-dark"  style="background:#DAAB82"><span class="name">meter.mid</span><span class="hex">#DAAB82</span></div>
+      <div class="swatch ink-light" style="background:#C17D7A"><span class="name">meter.high</span><span class="hex">#C17D7A</span></div>
+      <div class="swatch ink-dark"  style="background:#FAE1BB"><span class="name">meter.peakHold</span><span class="hex">#FAE1BB</span></div>
+
+      <div class="swatch ink-dark"  style="background:#F0DBBF"><span class="name">agentIndicator</span><span class="hex">#F0DBBF</span></div>
+    </div>
+  </div>
+
+  <h2>3 · type scale</h2>
+  <div class="panel">
+    <div class="type-row"><div class="label">display<small>56 / 1.05 / 600</small></div><div class="t-display">New Session</div></div>
+    <div class="type-row"><div class="label">h1<small>36 / 1.15 / 600</small></div><div class="t-h1">Arrangement</div></div>
+    <div class="type-row"><div class="label">h2<small>24 / 1.22 / 500</small></div><div class="t-h2">F minor · 94 BPM · steady</div></div>
+    <div class="type-row"><div class="label">body<small>15 / 1.45 / 400</small></div><div class="t-body">I've applied a subtle mid-side EQ and compression to the Rhodes track to give it more presence and clarity in the mix.</div></div>
+    <div class="type-row"><div class="label">label<small>11 / 0.08em / 500</small></div><div class="t-label">BAR.BEAT.SUB</div></div>
+    <div class="type-row"><div class="label">monoReadout<small>56 / 1.0 / 500</small></div><div class="t-mono-readout">12.3.1</div></div>
+    <div class="type-row"><div class="label">monoBody<small>13 / 1.35 / 400</small></div><div class="t-mono-body">−3.2 dB GR · sat 35% · plate · 1.4s</div></div>
+  </div>
+
+  <h2>4 · transport pill (slot-machine moment)</h2>
+  <p class="lede">A condensed reconstruction of <code>clawdaw_transport_detail.png</code> using only token values. Hover the buttons; press them. The spring easing should feel tactile.</p>
+  <div class="panel" style="display:flex; justify-content:center; padding: var(--s10) var(--s6);">
+    <div class="transport">
+      <button class="btn play" aria-label="Play">
+        <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M6 4 L16 10 L6 16 Z"/></svg>
+      </button>
+      <button class="btn stop" aria-label="Stop">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor"><rect x="2" y="2" width="10" height="10" rx="2"/></svg>
+      </button>
+      <button class="btn record" aria-label="Record">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="#2A1A18"><circle cx="7" cy="7" r="4"/></svg>
+      </button>
+      <div class="divider"></div>
+      <div class="digit-group"><span class="digits">94</span><span class="label">BPM</span></div>
+      <div class="divider"></div>
+      <div class="digit-group"><span class="digits">12.3.1</span><span class="label">BAR.BEAT.SUB</span></div>
+      <div class="divider"></div>
+      <div class="meter-mini"><div class="bar"></div><div class="bar" style="height:80%"></div></div>
+      <div class="digit-group"><span class="digits" style="font-size:18px">−2.4</span><span class="label">dB</span></div>
+    </div>
+  </div>
+
+  <h2>5 · glass material + radii</h2>
+  <p class="lede">Each pebble has the glass treatment (surface alpha 0.85, blur 24px, edge highlight, inner shadow). Labels show their corner radius.</p>
+  <div class="panel">
+    <div class="radii">
+      <div style="border-radius:10px">control · 10</div>
+      <div style="border-radius:16px">card · 16</div>
+      <div style="border-radius:20px">panel · 20</div>
+      <div style="border-radius:9999px">pill · ∞</div>
+    </div>
+  </div>
+
+  <h2>6 · meter gradient</h2>
+  <p class="lede">Single bar showing low → mid → high with the peak-hold dot. Bottom should read dusty sage, middle warm amber, top warm coral. The dot is pale gold.</p>
+  <div class="panel" style="display:flex; gap:var(--s8); align-items:center; justify-content:center;">
+    <div class="meter-pill"></div>
+    <div class="meter-pill"></div>
+  </div>
+
+  <h2>7 · elevation</h2>
+  <p class="lede">Three states. The shadow color is warm-tinted (<code>rgba(60,30,21,*)</code>) — a neutral shadow would read cold on this background.</p>
+  <div class="panel">
+    <div class="elev-row">
+      <div class="elev-card elev-rest">rest</div>
+      <div class="elev-card elev-hover">hover</div>
+      <div class="elev-card elev-active">active</div>
+    </div>
+  </div>
+
+  <h2>8 · agent indicator</h2>
+  <p class="lede">Soft warm cream-gold pebble with a subtle halo. Should read as a calm presence — not a flashy AI gradient.</p>
+  <div class="panel" style="display:flex; gap:var(--s5); align-items:center; padding:var(--s10) var(--s6); justify-content:center;">
+    <div class="agent-pebble"></div>
+    <span class="t-h2" style="color:var(--text-primary);">Agent</span>
+  </div>
+
+  <h2>9 · spacing scale</h2>
+  <p class="lede">4-base scale, visualized as bar heights.</p>
+  <div class="panel">
+    <div class="spacing">
+      <div><div class="bar" style="height:4px"></div><span class="name">px1·4</span></div>
+      <div><div class="bar" style="height:8px"></div><span class="name">px2·8</span></div>
+      <div><div class="bar" style="height:12px"></div><span class="name">px3·12</span></div>
+      <div><div class="bar" style="height:16px"></div><span class="name">px4·16</span></div>
+      <div><div class="bar" style="height:20px"></div><span class="name">px5·20</span></div>
+      <div><div class="bar" style="height:24px"></div><span class="name">px6·24</span></div>
+      <div><div class="bar" style="height:32px"></div><span class="name">px8·32</span></div>
+      <div><div class="bar" style="height:40px"></div><span class="name">px10·40</span></div>
+      <div><div class="bar" style="height:48px"></div><span class="name">px12·48</span></div>
+      <div><div class="bar" style="height:64px"></div><span class="name">px16·64</span></div>
+    </div>
+  </div>
+
+  <p class="lede" style="margin-top:var(--s12); font-family:var(--ff-mono); font-size:11px; color:var(--text-tertiary);">
+    Values mirrored from ui/src/design/tokens.ts. If you change one, change both.
+  </p>
+</main>
+</body>
+</html>
