@@ -4,6 +4,60 @@ Append-only log of each work session. Newest at the top.
 
 ---
 
+## 2026-05-10 (late) — Housekeeping: Phase 3 merged to main, repo pushed to GitHub ✅
+
+**Goal:** Pre-Phase-4 cleanup. Phase 3's UI work landed earlier today on a feature branch (`claude/hardcore-chaplygin-350368`) but never made it onto `main`. Status report tonight surfaced this — eight commits, ~3700 lines, including the two post-run bug fixes. Get it onto `main`, push everything to GitHub for off-machine backup, prune dead branches, before any further work.
+
+**Outcome:** `main` now contains the Phase 3 Tauri UI work as commit `269114d` (merge of `claude/hardcore-chaplygin-350368` via `--no-ff`). Repo is mirrored at `https://github.com/sammythayermusic-ship-it/CLAWDAW.git`. All six `claude/*` worktree branches deleted locally — every one was either merged into `main` or had its work brought in by tonight's merge. `main` is the only branch on GitHub.
+
+### What was done, in order
+
+1. **Read the Phase 3 branch carefully before touching it.** The earlier status report had wrongly assumed all `claude/*` branches were stale. `git log claude/<branch> --not main --oneline` per branch revealed `claude/hardcore-chaplygin-350368` was 8 commits ahead of `main` with the entire Phase 3 implementation. Five of the other branches had nothing unmerged; `claude/elated-driscoll-a01eb3` likewise had nothing unmerged.
+2. **Reset a misguided housekeeping commit.** I had already authored a "Phase 3 prep" commit on `main` (`b7e656f`) before discovering the unmerged branch. That commit added back `docs/phase-3-plan.md` and `docs/phase-3-claude-code-prompt.md`, which the Phase 3 branch had deliberately deleted (the autonomous run consumed them). Reset to `f071e59` to keep history clean.
+3. **Merged `claude/hardcore-chaplygin-350368` into `main` with `--no-ff`.** Brings all 8 commits in as one coherent unit visible in `git log --first-parent`. The merge commit message lists all 8 original commit subjects for searchability.
+4. **Pruned all six `claude/*` worktree branches locally.** With Phase 3 now on `main`, no branch had unmerged work. Pruned: `dazzling-mendeleev-951f13`, `elated-driscoll-a01eb3`, `hardcore-chaplygin-350368`, `lucid-blackburn-8c6294`, `nervous-merkle-d652f8`, `sad-aryabhata-bb8d11`.
+5. **Configured the `origin` remote and pushed `main` to GitHub.** Added `origin → https://github.com/sammythayermusic-ship-it/CLAWDAW.git`. First push with `-u origin main` so future `git push`/`pull` work without arguments.
+
+### Decisions made tonight
+
+- **Push the 300 MB of prototype PNGs as-is, no LFS yet.** The 2026-05-09 log flagged this as a future cleanup. Decision: defer. Largest single PNG is 27 MB (well under GitHub's 100 MB hard limit); 15 files × 18–28 MB ≈ 300 MB is below GitHub's 1 GB soft limit. GitHub warns on files >50 MB but none of ours hit that. Revisit if/when push times start hurting.
+- **Delete all six `claude/*` worktree branches.** Including `claude/hardcore-chaplygin-350368` once its work was merged. The random-name convention used by Claude Code worktrees is fine for in-flight work but each branch is dead the moment the work lands on `main`. Keeping them around just clutters the branch list.
+- **Don't push the `claude/*` branches to GitHub.** Main is the only branch visible on the remote. Future Phase work happens on new feature branches.
+
+### Verification
+
+- `git log --oneline -12` shows `269114d Merge branch 'claude/hardcore-chaplygin-350368'` at the top of `main`, with the 8 Phase 3 commits beneath it followed by the pre-Phase-3 history.
+- `git ls-remote origin main` returns the same SHA as `git rev-parse main`.
+- `git branch -a` shows `main` and `remotes/origin/main` only — no stragglers.
+- `git status` clean.
+- `.gitignore` audit confirmed `.claude/`, `engine/build/`, `engine/third_party/`, `engine/generated/`, `agent/generated/`, `ui/src/generated/` are all excluded. No build artifacts followed the merge in.
+
+### Known limitations
+
+- **No CI yet.** The repo lives on GitHub but no GitHub Actions workflows. The CLAUDE.md plan calls for `buf breaking` in CI; not blocking Phase 4 but worth a future bite. Engine build matrix + `pnpm tauri build` smoke test + `cargo check` would be reasonable starter workflows.
+- **No `README.md` at the repo root.** The GitHub project landing page will be bare. Trivial fix in any future session — the planning doc in `docs/daw-build-planning.md` has plenty of source material.
+- **`Cargo.lock` still gitignored.** The Phase 3 session log called this out; standard Tauri 2 template would commit it. Leaving as-is until / unless we hit a transitive-Rust-dep security issue.
+- **Prototype PNGs are still raw blobs in `main`.** Repo total is ~300 MB at HEAD. Future cleanup → LFS, but deferred.
+
+### Repo state
+
+- `main` at `269114d`. Local and `origin/main` identical.
+- Branch list: `main` only. (Was: `main` + 6 stale `claude/*`.)
+- Remote: `origin` → `https://github.com/sammythayermusic-ship-it/CLAWDAW.git` (was: no remote).
+- One merge commit added this session; no other code changes.
+
+### Next session
+
+Phase 4: Python MCP server exposing the engine's RPCs as tools so Claude can talk to it directly. The engine has 13 RPCs ready; agent scaffolding goes into `agent/` (currently empty except for gitignored generated proto stubs). See CLAUDE.md "Phase 4: agent v1" and `docs/daw-build-planning.md` for the broader plan.
+
+Reasonable side bites that could go before Phase 4 if Sammy prefers polish-then-extend: real transport RPCs in the engine (Play/Stop/Record proto handlers — currently `Unimplemented`), a "knobs" pass on PluginChain making it functional rather than informational, or `tauri-plugin-window-state` for window position persistence. All three are listed in the Phase 3 session log's "Next session" section.
+
+### Time spent
+
+~20 minutes — slightly longer than expected because of the wrong-turn reset (committing housekeeping → discovering the unmerged Phase 3 branch → resetting → merging properly). Pattern lesson: always run `git log <branch> --not main` on every leftover branch before declaring it stale, especially when "stale" branches use the same name-prefix as in-flight work.
+
+---
+
 ## 2026-05-10 — Phase 3 Tauri UI: scaffold, live engine wiring, three panels ✅
 
 **Goal:** Land the first desktop window for CLAWDAW. Tauri 2 + React + TypeScript shell, styled exclusively from `ui/src/design/tokens.ts`, talking to `clawdaw_engine` over native gRPC (tonic on the Rust side, Tauri commands + event channel into JS), with three panels — TransportBar, TrackList, PluginChain — mirroring engine state via `GetProject` + `SubscribeEvents`. 3-hour autonomous block following [docs/phase-3-plan.md](phase-3-plan.md).
