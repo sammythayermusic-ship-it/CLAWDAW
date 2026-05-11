@@ -462,6 +462,173 @@ public:
 
     // -------- Mutations --------
 
+    grpc::Status AddTrack(grpc::ServerContext* /*context*/,
+                          const daw::v1::AddTrackRequest* request,
+                          daw::v1::AddTrackResponse* response) override {
+        // v1: only AUDIO. MIDI tracks in Tracktion are AudioTracks that hold
+        // MIDI clips, so insertNewAudioTrack would technically work for them
+        // too, but our TrackSummary type-reporter (protoTrackType) can't
+        // distinguish them anyway — both come back as AUDIO. To keep the
+        // tool surface honest, return INVALID_ARGUMENT for everything that
+        // isn't AUDIO; we'll expand once the engine can faithfully round-trip
+        // the others.
+        if (request->type() != daw::v1::TRACK_TYPE_AUDIO) {
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                                "Only TRACK_TYPE_AUDIO is supported in v1");
+        }
+
+        const auto commit_id = makeCommitId();
+        const std::string requestedName = request->name();
+
+        std::string new_track_id;
+        std::string actualName;
+        // insertNewAudioTrack triggers TrackList's AsyncUpdater (and likely
+        // creates the default volume/level-meter plugins under the hood),
+        // both of which need the message thread to be *actively dispatching*
+        // — same constraint as the AddPlugin handler. Holding
+        // MessageManagerLock from a worker thread blocks the dispatch loop
+        // and the call hangs forever. Use the callAsync+future pattern.
+        runOnMessageThreadSync([&] {
+            auto trackPtr = edit_.insertNewAudioTrack(
+                te::TrackInsertPoint::getEndOfTracks(edit_),
+                /*SelectionManager*/ nullptr,
+                /*addDefaultPlugins*/ true);
+            if (trackPtr == nullptr) return;
+            if (! requestedName.empty()) {
+                trackPtr->setName(juce::String(requestedName));
+            }
+            new_track_id = trackPtr->itemID.toString().toStdString();
+            actualName = trackPtr->getName().toStdString();
+        });
+
+        if (new_track_id.empty()) {
+            return grpc::Status(grpc::StatusCode::INTERNAL,
+                                "insertNewAudioTrack returned null");
+        }
+
+        const std::string description = "Added audio track: " + actualName;
+
+        {
+            daw::v1::Event e;
+            e.mutable_track_added()->set_track_id(new_track_id);
+            emitEvent(std::move(e));
+        }
+
+        // Undo: re-find the track by id (the pointer would dangle if any
+        // intervening op removed it) and call edit_.deleteTrack on it. Same
+        // callAsync rationale as the insertion path. KNOWN LIMITATION: if a
+        // sibling DeleteTrack+Undo cycle has happened on this track in the
+        // interim, Tracktion's track cache may return a Track whose `state`
+        // ValueTree is detached, and deleteTrack's `state.getParent().removeChild`
+        // becomes a no-op. See the 2026-05-11 session-log entry under
+        // "Known limitations." pytest's add+undo path passes; the MCP smoke
+        // sidesteps the multi-mutation cleanup that triggers it.
+        pushUndo(commit_id, description, [this, new_track_id] {
+            runOnMessageThreadSync([this, new_track_id] {
+                if (auto* track = findTrackById(edit_, new_track_id)) {
+                    edit_.deleteTrack(track);
+                }
+            });
+            daw::v1::Event e;
+            e.mutable_track_removed()->set_track_id(new_track_id);
+            emitEvent(std::move(e));
+        });
+
+        emitCommandApplied(commit_id, description);
+        response->set_track_id(new_track_id);
+        fillMutationResult(response->mutable_mutation(), commit_id, description);
+        return grpc::Status::OK;
+    }
+
+    grpc::Status DeleteTrack(grpc::ServerContext* /*context*/,
+                             const daw::v1::DeleteTrackRequest* request,
+                             daw::v1::MutationResult* response) override {
+        // Confirmation gate per the proto contract — every Delete*/Remove*
+        // RPC requires confirm=true so an agent typo doesn't nuke a track.
+        if (! request->confirm()) {
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                                "DeleteTrack requires confirm=true");
+        }
+        auto* track = findTrackById(edit_, request->track_id());
+        if (track == nullptr) {
+            return grpc::Status(grpc::StatusCode::NOT_FOUND,
+                                "Track not found: " + request->track_id());
+        }
+        // Master / global tracks (Tempo, Marker, Chord, Arranger) aren't
+        // user-created — refuse to delete them.
+        if (track->isMasterTrack() || ! te::TrackList::isMovableTrack(track->state)) {
+            return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
+                                "Cannot delete master or global track");
+        }
+
+        const auto commit_id = makeCommitId();
+        const std::string track_id = request->track_id();
+        const std::string description = "Deleted track: " + track->getName().toStdString();
+
+        // Capture the track's full ValueTree as XML before deletion so undo
+        // can reconstruct it with plugins, regions, and mixer state intact.
+        // Also remember the preceding top-level track so undo restores at
+        // the same index. deleteTrack tears down plugins, which (same as
+        // their construction) needs the dispatch loop running — use the
+        // callAsync variant.
+        std::string capturedXml;
+        std::string precedingTrackId;
+        runOnMessageThreadSync([&] {
+            capturedXml = track->state.toXmlString().toStdString();
+
+            te::Track* prev = nullptr;
+            edit_.visitAllTopLevelTracks([&](te::Track& t) {
+                if (&t == track) return false;  // stop; prev holds the predecessor
+                prev = &t;
+                return true;
+            });
+            if (prev != nullptr) {
+                precedingTrackId = prev->itemID.toString().toStdString();
+            }
+
+            edit_.deleteTrack(track);
+        });
+
+        {
+            daw::v1::Event e;
+            e.mutable_track_removed()->set_track_id(track_id);
+            emitEvent(std::move(e));
+        }
+
+        pushUndo(commit_id, description,
+                 [this, track_id, capturedXml, precedingTrackId] {
+            std::string restored_id;
+            runOnMessageThreadSync([&] {
+                auto vt = juce::ValueTree::fromXml(juce::String(capturedXml));
+                if (! vt.isValid()) return;
+                // Parent is invalid (top-level); preceding is the captured
+                // sibling, or invalid to insert at the head of the list.
+                te::EditItemID parentID;  // invalid → top level
+                auto precedingID = precedingTrackId.empty()
+                                       ? te::EditItemID()
+                                       : te::EditItemID::fromString(juce::String(precedingTrackId));
+                auto restored = edit_.insertTrack(
+                    te::TrackInsertPoint(parentID, precedingID),
+                    vt,
+                    /*SelectionManager*/ nullptr);
+                if (restored != nullptr) {
+                    restored_id = restored->itemID.toString().toStdString();
+                }
+            });
+            // The original ID was free (we just deleted it) so insertTrack
+            // should preserve it, but if Tracktion remapped, prefer the
+            // restored id in the event so subscribers track the live track.
+            daw::v1::Event e;
+            e.mutable_track_added()->set_track_id(
+                restored_id.empty() ? track_id : restored_id);
+            emitEvent(std::move(e));
+        });
+
+        emitCommandApplied(commit_id, description);
+        fillMutationResult(response, commit_id, description);
+        return grpc::Status::OK;
+    }
+
     grpc::Status RenameTrack(grpc::ServerContext* /*context*/,
                              const daw::v1::RenameTrackRequest* request,
                              daw::v1::MutationResult* response) override {
