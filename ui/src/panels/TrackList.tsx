@@ -2,11 +2,17 @@
 // the store's selectedTrackId; downstream PluginChain reads that id to
 // render its plugin chain.
 
+import { useShallow } from "zustand/shallow";
+
 import { useEngineStore, selectVisibleTracks } from "../state/store";
 import "./TrackList.css";
 
 export function TrackList() {
-  const tracks = useEngineStore(selectVisibleTracks);
+  // Zustand v5 uses Object.is for equality on selector output. selectVisibleTracks
+  // returns a new array reference each call (via .map().filter()), so the bare
+  // selector triggers an infinite re-render loop. useShallow does a shallow
+  // (per-element) compare of the result and breaks the loop.
+  const tracks = useEngineStore(useShallow(selectVisibleTracks));
   const selectedId = useEngineStore((s) => s.selectedTrackId);
   const setSelected = useEngineStore((s) => s.setSelectedTrack);
   const trackDetails = useEngineStore((s) => s.trackDetails);

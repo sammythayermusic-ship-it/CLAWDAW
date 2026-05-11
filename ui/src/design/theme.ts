@@ -51,7 +51,10 @@ export function applyThemeToRoot(): void {
   setVar(root, "--font-mono", typography.family.mono);
 
   for (const [name, def] of Object.entries(typography.scale)) {
-    setVar(root, `--type-${name}-size`, def.size);
+    // Sizes are written as unitless numbers so components can do
+    // `calc(var(--type-h1-size) * 1px)` (or 1em, etc.). Writing them
+    // with a "px" suffix here would make the calc invalid (length*length).
+    root.style.setProperty(`--type-${name}-size`, String(def.size));
     setVar(root, `--type-${name}-line-height`, String(def.lineHeight));
     setVar(root, `--type-${name}-weight`, String(def.weight));
     setVar(root, `--type-${name}-tracking`, `${def.tracking}em`);
