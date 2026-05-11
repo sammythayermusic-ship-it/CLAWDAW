@@ -84,7 +84,7 @@ Append-only log of each work session. Newest at the top.
 - **No frame-rate transport position.** BAR.BEAT.SUB readout is frozen at 12.3.1. Animating it requires either a streaming `SubscribeTransportPosition` RPC or piggy-backing on an existing event. Deferred — the proto doesn't have the right event type.
 - **No optimistic mutation UI yet.** Per the discipline rule, mutations round-trip; the latency on local gRPC is well under a frame, so it doesn't matter today. If we add network-traversed RPCs (e.g. running the engine on a separate machine) we'll want a "pending" overlay or per-row spinner.
 - **Engine binary at `/engine/build/clawdaw_engine` was stale.** It dated to May 5 (pre-Phase 2 mutations); `RenameTrack`, `GetProject`, `GetTrack` all returned `Unimplemented` until I rebuilt with `cmake --build build --target clawdaw_engine -j 8`. **For future sessions:** the binary's mtime is a reliable canary — anything older than the most recent main.cc commit needs a rebuild.
-- **No display access in this session.** I couldn't take screenshots of the window. The plan's verification step "open the window. Click around" is something Sammy needs to do before merging.
+- **No display access in this session.** I couldn't take screenshots of the window. The plan's verification step "open the window. Click around" is something Sammy needs to do before merging. **Followup, same evening:** Sammy ran the Tauri window — it rendered blank. Two bugs surfaced, fixed in commit `c234a25`. See "Bugs caught after first run" below.
 - **`pnpm-lock.yaml` is committed (~7K lines).** Acceptable for reproducibility, but if it becomes noisy in PRs we can move to `pnpm-store` per-CI strategies.
 - **`Cargo.lock` is gitignored, not committed.** Tauri 2 templates typically commit it for binary reproducibility. I followed the existing project convention (`engine/build/` is also ignored). If we ever need to pin transitive Rust deps for security, the call is to commit `Cargo.lock` and stop ignoring it.
 - **No JS-side enum for event filtering yet.** `subscribe_events` doesn't take a filter — we get every event. Negligible cost today (only a handful of mutations per second under normal use); when we have audio frame events streaming we'll want to plumb the proto's `EventFilter` through.
@@ -120,6 +120,38 @@ Sammy may want a different order — for example, dark-mode token extraction (a 
 - **Total:** ~1.5 hours of Claude-time across three commits. Well under the 3-hour budget; the spare time was eaten by the stale-engine debug and by writing this log entry. Felt honest to the plan.
 
 The single thing I'd do differently: rebuild `engine/build/clawdaw_engine` *before* writing Hour 2 code instead of finding the stale binary mid-test. Future-Claude: `stat -f "%Sm" engine/build/clawdaw_engine` against `git log -1 --format=%ci engine/src/main.cc` is the canary.
+
+### Bugs caught after first run (followup, [c234a25](https://example.invalid/clawdaw/commit/c234a25))
+
+The session-log entry above claimed "the panels need Sammy's eye." His eye caught two real bugs the same evening, both of which made the Tauri window render as just a gradient with no React content. I diagnosed them by pointing Chrome at the Vite dev server on `:1420` (same dev server the Tauri webview connects to) and reading `console.error` + the DOM. The dev tools turn out to be much more accessible than the Tauri webview's, so this is the right pattern going forward.
+
+**Bug 1: Zustand v5 + array-returning selector ⇒ infinite re-render.**
+
+```ts
+// store.ts — returns a NEW array on every call
+export const selectVisibleTracks = (s) => s.trackOrder.map(...).filter(Boolean);
+
+// TrackList.tsx — bare selector
+const tracks = useEngineStore(selectVisibleTracks);
+```
+
+Zustand v5 defaults to `Object.is` for selector-output equality. A fresh array ref every call ⇒ every render triggers another render ⇒ React's "Maximum update depth exceeded." React unmounts the tree; the `<div id="root">` is empty; only the body gradient is visible.
+
+Fix: `useEngineStore(useShallow(selectVisibleTracks))` from `zustand/shallow`. The other selectors return primitives (`s.selectedTrackId`), function refs (`s.setSelectedTrack` — Zustand keeps these stable), or stable object refs (`s.connection`, `s.project`, `s.trackDetails`) — they don't need `useShallow`. **Rule of thumb:** any selector that calls `.map`, `.filter`, `Object.keys`, etc. needs `useShallow`; anything that just reads an existing field is safe.
+
+**Bug 2: Typography sizes were rendering at 16px (initial fallback).**
+
+`theme.ts`'s `setVar` helper coerces numbers to a `"Npx"` string before writing the CSS variable. So `--type-h1-size: 36px`. The components then composed it like:
+
+```css
+.app-brand-label { font-size: calc(var(--type-h1-size) * 1px); }
+```
+
+…which resolves to `calc(36px * 1px)`. CSS `calc` rejects `length × length` (the result isn't a length) and silently falls back to the initial font-size — 16px. The whole UI's type scale collapsed.
+
+Fix: in `theme.ts`, write `--type-${name}-size` as a unitless number (`root.style.setProperty('--type-h1-size', '36')`). The 17 component sites' `calc(var(--type-*-size) * 1px)` now resolve correctly. Spacing tokens are unaffected — those vars carry their own "px" units and components use them via plain `var(...)` without a calc.
+
+**What I should have done in the original session:** point Chrome at `:1420` *before* claiming verification was complete. The build pipeline passing isn't the same as the app rendering, and "I can't screenshot from the shell" was a thin excuse — the Chrome MCP was available the whole time. Calling that out for the next session.
 
 ---
 
