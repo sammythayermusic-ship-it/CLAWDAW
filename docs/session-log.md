@@ -4,6 +4,146 @@ Append-only log of each work session. Newest at the top.
 
 ---
 
+## 2026-05-11 — Phase 4 v1: Python MCP agent exposing the 13 implemented engine RPCs ✅
+
+**Goal:** Stand up `agent/` — a Python MCP server that exposes the engine's currently-implemented RPCs as tools so Claude can drive the engine directly. The engine has been ready for this since 2026-05-06; the only blocker was scaffolding.
+
+**Outcome:** Working. `clawdaw-agent` boots via `uv run`, registers 13 MCP tools over stdio, connects to the engine on `127.0.0.1:50051`, and round-trips reads, mutations, and undo. Three commits on `claude/phase-4-agent-v1` on top of `16b46da`; branch pushed for Sammy's PR review (not merged to main).
+
+### What was built (file by file)
+
+**Hour 1 — scaffold ([31f641d](https://example.invalid/clawdaw/commit/31f641d))**
+
+- `agent/pyproject.toml` — uv project, Python 3.11+, hatchling build backend. Runtime deps: `mcp>=1.2`, `grpcio>=1.66`, `protobuf>=6.33,<7`. Dev: `grpcio-tools`, `pytest`, `pytest-asyncio`, `ruff`. Console script `clawdaw-agent → clawdaw_agent.server:main`.
+- **`[tool.hatch.build.targets.wheel] packages = ["src/clawdaw_agent", "generated/daw"]`** — installs the generated `daw.v1` proto modules as a *sibling* top-level package rather than re-exporting them. Means tools can `from daw.v1 import engine_pb2` directly, same as the proto generator emits, with no path hackery.
+- `agent/scripts/regen-proto.sh` — `uv run python -m grpc_tools.protoc -I../proto ...` against the 8 proto files. **Not `buf generate`.** The buf cloud `protocolbuffers/python` plugin currently emits gencode targeting protobuf 7.34.1 (`# Protobuf Python Version: 7.34.1` in the file header), but the latest PyPI runtime is 6.33.6 and the gencode/runtime check refuses cross-major. Local generation uses whatever `grpcio-tools` is in the venv, so the two stay matched.
+- `agent/uv.lock` — committed for reproducibility (132 packages locked, mostly mcp's transitive deps: pydantic, starlette, anyio).
+- `.gitignore` updated: drop `agent/.venv/`, `__pycache__/`, `*.egg-info/`, pytest/ruff caches. The generated/ comment now describes the python regen path.
+- README placeholder (rewritten in Hour 3).
+
+**Hour 2 — engine client + MCP server ([d704e2f](https://example.invalid/clawdaw/commit/d704e2f))**
+
+- `src/clawdaw_agent/engine_client.py` — async gRPC wrapper over `grpc.aio`. One method per implemented RPC:
+  - Reads (3): `get_project`, `list_tracks`, `get_track`.
+  - Track mutations (4): `rename_track`, `set_track_volume`, `set_track_pan`, `undo`.
+  - Plugins (5): `rescan_plugins`, `list_available_plugins`, `add_plugin`, `get_plugin_parameters`, `set_plugin_parameter`.
+  - Events (1): `start_event_stream` (background task) + `recent_events(n)` for snapshot.
+- `_coerce_id(value)` — the engine wire type is `string` for track / plugin IDs, but Claude routinely passes integers via MCP. Coerce to `str`; `None` becomes empty string.
+- Two timeout disciplines:
+  - Unary RPCs: per-call `timeout=` arg, default 5s. `rescan_plugins` bumps to ≥30s (cold scans take that long).
+  - Streaming `SubscribeEvents`: **no** timeout. A `timeout=` here would cancel an idle stream after the deadline — exactly the 2026-05-10 bug-3 trap on the Tauri side. Comment in `_run_event_stream` calls this out.
+- Event buffer: bounded `collections.deque(maxlen=256)`. The agent subscribes once on boot; events fill the deque; the `subscribe_events` MCP tool returns a snapshot of the last-N.
+- `src/clawdaw_agent/server.py` — FastMCP server. Lifespan context opens the channel and kicks off the event stream on boot, closes on shutdown.
+- 13 `@mcp.tool()` functions, each a 5-line wrapper: try the engine call, `MessageToDict(always_print_fields_with_no_presence=True)` the response, return the dict. Mutation tools surface the engine's `commit_id` in their response.
+- gRPC failures come back as structured `{"ok": False, "action": ..., "grpc_code": ..., "details": ...}` rather than raising. LLM clients handle structured errors much better than tracebacks.
+- Docstrings are tuned for LLM consumption: one-line summary, then explicit Args with units, ranges, and side notes (e.g. "the engine clamps but won't error" on volume, "Pass this OR `native_value`, not both" on `set_plugin_parameter`).
+
+**Hour 3 — tests + smoke probe + docs (this commit)**
+
+- `tests/test_engine_client.py` — pytest integration test, marked `@pytest.mark.integration` so any future CI pytest run skips it by default. Uses an async fixture that probes the engine via `channel_ready()` with a 1s timeout; auto-skips if the engine isn't running. The test:
+  1. `get_project` baseline.
+  2. Filter to AUDIO (type=1) / MIDI (type=2) tracks (see "Things learned" below).
+  3. Rename the first matching track to `<name>__pytest_phase4`.
+  4. Re-`get_project` and assert the new name.
+  5. `undo()` (no commit_id → latest).
+  6. Re-`get_project` and assert revert.
+- `scripts/mcp_smoke.py` — one-shot end-to-end probe over the MCP stdio transport. Spawns `uv run clawdaw-agent` as a subprocess, connects as an MCP `ClientSession`, lists tools, runs the same rename+undo trace through the MCP layer, dumps the buffered events. Not a pytest test (because it spawns the server itself); useful as a "smoke me" command after touching the server.
+- `agent/README.md` — prerequisites, env vars, the regen-proto rationale, how to wire the server into Claude Desktop, where to look next.
+
+### Verification
+
+1. `uv sync` runs clean (132 packages installed, ~3s on a warm cache).
+2. `uv run ruff check src` — `All checks passed!` (line-length bumped to 120 so MCP tool docstrings stay on one line; LLMs do better with single-sentence descriptions).
+3. `uv run pytest -m integration` — **1 passed in 0.07s** against the live engine on :50051.
+4. `uv run clawdaw-agent` boots, lists 13 tools via the MCP stdio probe:
+   ```
+   list_tracks, get_project, get_track,
+   rename_track, set_track_volume, set_track_pan, undo,
+   rescan_plugins, list_available_plugins, add_plugin,
+     get_plugin_parameters, set_plugin_parameter,
+   subscribe_events
+   ```
+5. **End-to-end MCP trace** (from `scripts/mcp_smoke.py`):
+   ```
+   == get_project ==
+     target track: id='1003' name='Bass'
+   == rename_track id='1003' → 'Bass__mcp_smoke' ==
+     commit_id='9997c90debd548a2acc210bb89aec006'
+     description='Renamed track to "Bass__mcp_smoke"'
+   == get_project (confirm rename) ==
+     track '1003' name now: 'Bass__mcp_smoke'
+   == undo commit_id='9997c90debd548a2acc210bb89aec006' ==
+     commit_id='a2828398c63f42548cacb53b590c833f'
+     description='Undo: Renamed track to "Bass__mcp_smoke"'
+   == get_project (confirm revert) ==
+     track '1003' name now: 'Bass'
+   == subscribe_events n=5 ==
+     buffered events: 4
+       - track_renamed (efcd735d)
+       - command_applied (936fad51)
+       - track_renamed (51424bb0)
+       - command_undone (fd985e8f)
+   ```
+   The event buffer caught the full 4-event sequence the engine emitted for the rename+undo cycle, including the inverse `track_renamed` that fires when `undo` reverts.
+
+### Things learned along the way
+
+1. **Buf cloud Python plugin is ahead of the runtime.** The remote `buf.build/protocolbuffers/python` plugin emits protobuf-7.34.1 gencode. There's no `protobuf==7.x` on PyPI yet — `pip install protobuf` tops out at 6.33.6, and `_runtime_version.ValidateProtobufRuntimeVersion` refuses to load 7.x gencode with a 6.x runtime. Routing Python generation through `grpc_tools.protoc` in the venv sidesteps it entirely (the protoc bundled there emits whatever matches its `protobuf` dep). Documented in `agent/scripts/regen-proto.sh` for the next person who hits this.
+
+2. **The Master track (TRACK_TYPE_BUS, 4) silently no-ops on `RenameTrack`.** The engine returns a real `commit_id` but the name doesn't change — confusing the first time around because the RPC looks like it succeeded. Possibly intentional Tracktion behavior (master is a special bus). The integration test now filters to AUDIO and MIDI tracks only. Worth checking the engine source whether this is by design or a bug; not blocking Phase 4.
+
+3. **The MCP client/server result conversion.** `result.structuredContent` carries the JSON dict that FastMCP serialized; `result.content[0].text` is the same payload as JSON text. The smoke probe prefers `structuredContent` and falls back to parsing the text — both worked in this session but in case a future MCP version drops one of them, the fallback is cheap.
+
+### What was deferred (and why)
+
+- **No transport RPC wiring.** Out of scope per the prompt — engine still returns `Unimplemented` for `Engine.Play/Stop/Record`. The 4-tool transport surface is the obvious "next session" bite if a UI demo is the goal.
+- **No ML inference / listening layer.** Phase 5 territory.
+- **No `add_track` / `delete_track` / `set_track_mute` etc.** Strictly the 13 RPCs the engine implements. New RPCs slot in as ~10-line additions in both `engine_client.py` and `server.py`.
+- **No streaming MCP events.** Per the prompt, v1 surfaces events via the `subscribe_events` tool returning a snapshot from a deque the agent maintains internally. The MCP protocol supports server-sent notifications, but threading streaming gRPC → MCP through FastMCP is a bigger change than v1 warrants.
+- **No `redo`.** The proto exposes `Redo` but the engine returns `Unimplemented` (only `Undo` landed in Phase 2).
+- **No JSON Schema tightening on tool args.** FastMCP infers schemas from type annotations. The current Union types (`str | int` for IDs) come out as `anyOf` schemas — good enough for Claude. Could be tightened with `pydantic.Field` if a future LLM client is fussier.
+
+### Open / known limitations
+
+- **Engine version mismatch isn't checked.** If a future engine change adds a new RPC or breaks one, the agent will fail at call time with a gRPC `UNIMPLEMENTED` rather than at startup. A `GetServerInfo`-style RPC + a version check would be cheap to add.
+- **Master track rename is silently dropped.** See "Things learned" #2.
+- **No reconnect.** If the engine restarts, the agent's channel stays bad until the MCP client disconnects and reconnects. The Tauri UI has an exponential-backoff reconnect (added in the Phase 3 bug-3 fix); the agent doesn't. Could borrow the same pattern, but in practice MCP clients re-spawn agent subprocesses on reconnect anyway.
+- **`agent/generated/` is regenerated locally, not via buf.** This breaks the "one command regenerates everything" property the previous sessions had. Once `protobuf==7.x` ships on PyPI we should switch back to `buf generate`. Tracked in the regen-proto.sh header comment.
+
+### Repo state
+
+- Branch `claude/phase-4-agent-v1` at three commits on top of `16b46da`:
+  - `31f641d` Phase 4 Hour 1: agent scaffold — uv project, pyproject, stub regen script
+  - `d704e2f` Phase 4 Hour 2: engine_client.py + server.py — 13 MCP tools live
+  - (this commit) Phase 4 Hour 3: tests, MCP smoke probe, README, session log
+- New: 11 tracked files under `agent/` (pyproject, README, regen script, smoke probe, init, engine_client, server, test, tests/__init__, uv.lock; plus the gitignore update at root).
+- Generated stubs (`agent/generated/daw/v1/*.py`): 17 Python files, all gitignored.
+- No engine, UI, or proto-contract changes.
+- Branch pushed to `origin`; not merged to `main`. Sammy reviews via PR and merges manually.
+
+### Next session
+
+Picking up Phase 4 once the v1 agent merges:
+
+1. **Wire transport RPCs in the engine** (`Engine.Play / Stop / Record`) and expose `play`, `stop`, `record` tools. The UI's TransportBar buttons become live in the same change. The engine work is ~1 day; the agent surface is two more `@mcp.tool()` functions.
+2. **Add MIDI / region RPCs** (`AddTrack`, `ImportAudioFile`, `AddMidiNote`, `MoveRegion`). Lets Claude actually compose, not just mix.
+3. **`SubscribeTransportPosition` event** so the UI's BAR.BEAT.SUB readout animates. Needs a proto v1 addition (still backwards-compatible — adding a new event payload field is non-breaking).
+4. **Engine refactor.** `engine/src/main.cc` is ~1070 lines; splitting into `broadcaster.{h,cc}`, `track_handlers.cc`, `plugin_handlers.cc` is overdue. Not urgent.
+
+The agent surface is unblocked for everything in (1)–(3). New RPCs slot in as small additions; the discipline established here (thin pass-through, structured errors, commit_id round-trip) doesn't need to change.
+
+### Time spent
+
+~2 hours of Claude-time end-to-end, well under the 2.5h hard cap. Roughly:
+
+- Hour 1: ~30 min. Setup pyproject + uv sync + diagnose buf gencode/runtime mismatch + write regen-proto.sh.
+- Hour 2: ~45 min. Engine client + MCP server. The FastMCP API is concise enough that the 13-tool registration was mechanical once the first tool was working.
+- Hour 3: ~30 min. Integration test (one stumble on Master track → rephrased filter), MCP stdio smoke probe (one stumble on `structuredContent` vs `content[0].text`), README, this log.
+
+The single biggest "if I were doing it again" lesson: would have checked `agent/generated/`'s gencode version before writing pyproject and saved a sync cycle. Protobuf gencode/runtime drift is now a known canary on this project, same family as the engine-binary-mtime canary from Phase 3.
+
+---
+
 ## 2026-05-10 (late) — Housekeeping: Phase 3 merged to main, repo pushed to GitHub ✅
 
 **Goal:** Pre-Phase-4 cleanup. Phase 3's UI work landed earlier today on a feature branch (`claude/hardcore-chaplygin-350368`) but never made it onto `main`. Status report tonight surfaced this — eight commits, ~3700 lines, including the two post-run bug fixes. Get it onto `main`, push everything to GitHub for off-machine backup, prune dead branches, before any further work.
