@@ -134,11 +134,30 @@ export const useEngineStore = create<EngineStoreState>((set, get) => ({
         break;
       }
 
-      case "trackAdded":
+      case "trackAdded": {
+        // The event carries only the track_id; the full TrackSummary isn't
+        // on the payload. useEngineSync refetches GetProject when it sees
+        // this event, which hydrates the new track into the store. Nothing
+        // useful to do in the reducer.
+        break;
+      }
+
       case "trackRemoved": {
-        // Coarse-grained: the track set changed. Signal the hook to re-fetch
-        // GetProject. We can't reorder accurately from just the event.
-        set((s) => ({ project: s.project /* hook listens for these and re-fetches */ }));
+        // Drop the track from the store immediately so the row disappears
+        // without waiting for the (also-scheduled) refetch. If it was the
+        // selected track, deselect; hydrateFromProject will pick a sensible
+        // fallback after the refetch lands.
+        set((s) => {
+          if (!s.tracksById[e.trackId]) return s;
+          const { [e.trackId]: _removed, ...remainingTracks } = s.tracksById;
+          const { [e.trackId]: _droppedDetail, ...remainingDetails } = s.trackDetails;
+          return {
+            tracksById: remainingTracks,
+            trackOrder: s.trackOrder.filter((id) => id !== e.trackId),
+            trackDetails: remainingDetails,
+            selectedTrackId: s.selectedTrackId === e.trackId ? null : s.selectedTrackId,
+          };
+        });
         break;
       }
 

@@ -116,6 +116,30 @@ class EngineClient:
     # Track mutations
     # ------------------------------------------------------------------
 
+    async def add_track(self, track_type: str | int = "TRACK_TYPE_AUDIO", name: str = ""):
+        """Create a new track. v1 supports TRACK_TYPE_AUDIO only.
+
+        Accepts either the enum name (e.g. ``"TRACK_TYPE_AUDIO"``) or the
+        integer value. We coerce to the proto enum int so the request shape
+        is uniform.
+        """
+        from daw.v1 import common_pb2  # local import: keep module-level deps lean
+
+        if isinstance(track_type, str):
+            type_int = common_pb2.TrackType.Value(track_type)
+        else:
+            type_int = int(track_type)
+        req = engine_pb2.AddTrackRequest(type=type_int, name=name or "")
+        return await self._ensure_stub().AddTrack(req, timeout=self.unary_timeout_s)
+
+    async def delete_track(self, track_id: str | int, confirm: bool = False):
+        """Delete a track. Requires confirm=True per the proto contract;
+        the engine returns INVALID_ARGUMENT if confirm is false."""
+        req = engine_pb2.DeleteTrackRequest(
+            track_id=_coerce_id(track_id), confirm=bool(confirm)
+        )
+        return await self._ensure_stub().DeleteTrack(req, timeout=self.unary_timeout_s)
+
     async def rename_track(self, track_id: str | int, name: str):
         req = engine_pb2.RenameTrackRequest(track_id=_coerce_id(track_id), name=name)
         return await self._ensure_stub().RenameTrack(req, timeout=self.unary_timeout_s)
@@ -133,6 +157,21 @@ class EngineClient:
     async def undo(self, commit_id: str = ""):
         req = engine_pb2.UndoRequest(commit_id=commit_id or "")
         return await self._ensure_stub().Undo(req, timeout=self.unary_timeout_s)
+
+    # ------------------------------------------------------------------
+    # Transport
+    # ------------------------------------------------------------------
+
+    async def play(self):
+        return await self._ensure_stub().Play(empty_pb2.Empty(), timeout=self.unary_timeout_s)
+
+    async def stop(self):
+        return await self._ensure_stub().Stop(empty_pb2.Empty(), timeout=self.unary_timeout_s)
+
+    async def get_transport_state(self):
+        return await self._ensure_stub().GetTransportState(
+            empty_pb2.Empty(), timeout=self.unary_timeout_s
+        )
 
     # ------------------------------------------------------------------
     # Plugins

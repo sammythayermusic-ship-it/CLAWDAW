@@ -77,6 +77,14 @@ pub struct CommitDto {
 
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
+pub struct AddTrackResultDto {
+    pub track_id: String,
+    pub commit_id: String,
+    pub description: String,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct TransportStateDto {
     pub playing: bool,
     pub recording: bool,
@@ -239,6 +247,22 @@ impl From<proto::MutationResult> for CommitDto {
         Self {
             commit_id: m.commit_id,
             description: m.description,
+        }
+    }
+}
+
+impl From<proto::AddTrackResponse> for AddTrackResultDto {
+    fn from(r: proto::AddTrackResponse) -> Self {
+        let mut commit_id = String::new();
+        let mut description = String::new();
+        if let Some(m) = r.mutation {
+            commit_id = m.commit_id;
+            description = m.description;
+        }
+        Self {
+            track_id: r.track_id,
+            commit_id,
+            description,
         }
     }
 }

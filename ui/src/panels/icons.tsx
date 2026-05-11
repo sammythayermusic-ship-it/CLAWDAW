@@ -42,3 +42,21 @@ export function ChevronIcon({ size = 12 }: { size?: number }) {
     </svg>
   );
 }
+
+export function PlusIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
+      <path d="M7 2 V12 M2 7 H12" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+export function TrashIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
+      <path d="M2.5 3.5 H11.5" strokeLinecap="round" />
+      <path d="M5.5 3.5 V2.5 A0.5 0.5 0 0 1 6 2 H8 A0.5 0.5 0 0 1 8.5 2.5 V3.5" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M3.5 3.5 L4 11.5 A0.5 0.5 0 0 0 4.5 12 H9.5 A0.5 0.5 0 0 0 10 11.5 L10.5 3.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}

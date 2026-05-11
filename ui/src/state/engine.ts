@@ -5,12 +5,23 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-import type { CommitDto, EventDto, ProjectDto, TrackDto, TransportStateDto } from "./types";
+import type {
+  AddTrackResultDto,
+  CommitDto,
+  EventDto,
+  ProjectDto,
+  TrackDto,
+  TransportStateDto,
+} from "./types";
 
 export const engineApi = {
   getProject: () => invoke<ProjectDto>("get_project"),
   getTrack: (trackId: string) => invoke<TrackDto>("get_track", { trackId }),
 
+  addTrack: (trackType: "AUDIO" | "MIDI" | "AUX" | "BUS" | "FOLDER", name: string) =>
+    invoke<AddTrackResultDto>("engine_add_track", { trackType, name }),
+  deleteTrack: (trackId: string) =>
+    invoke<CommitDto>("engine_delete_track", { trackId }),
   renameTrack: (trackId: string, newName: string) =>
     invoke<CommitDto>("rename_track", { trackId, newName }),
   setTrackVolume: (trackId: string, volumeDb: number) =>

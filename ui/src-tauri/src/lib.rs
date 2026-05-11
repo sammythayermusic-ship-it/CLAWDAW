@@ -17,6 +17,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_project,
             commands::get_track,
+            commands::engine_add_track,
+            commands::engine_delete_track,
             commands::rename_track,
             commands::set_track_volume,
             commands::set_track_pan,

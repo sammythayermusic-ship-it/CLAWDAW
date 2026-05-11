@@ -70,6 +70,12 @@ export interface CommitDto {
   description: string;
 }
 
+export interface AddTrackResultDto {
+  trackId: string;
+  commitId: string;
+  description: string;
+}
+
 export interface TransportStateDto {
   playing: boolean;
   recording: boolean;

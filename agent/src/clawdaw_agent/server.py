@@ -138,6 +138,47 @@ async def get_track(ctx: Context, track_id: str | int) -> dict[str, Any]:
 
 
 @mcp.tool()
+async def add_track(
+    ctx: Context,
+    name: str = "",
+    track_type: str = "TRACK_TYPE_AUDIO",
+) -> dict[str, Any]:
+    """Create a new track at the end of the project. Returns `track_id` and a `commit_id` for undo.
+
+    Args:
+        name: Display name for the new track. Empty falls back to the engine's default ("Audio N").
+        track_type: One of `TRACK_TYPE_AUDIO`, `TRACK_TYPE_MIDI`, `TRACK_TYPE_BUS`, `TRACK_TYPE_FOLDER`,
+            `TRACK_TYPE_AUX`. v1 supports `TRACK_TYPE_AUDIO` only; others return INVALID_ARGUMENT.
+    """
+    try:
+        resp = await _client(ctx).add_track(track_type=track_type, name=name)
+        return _to_dict(resp)
+    except grpc.aio.AioRpcError as e:
+        return _err("add_track", e)
+
+
+@mcp.tool()
+async def delete_track(
+    ctx: Context, track_id: str | int, confirm: bool = False
+) -> dict[str, Any]:
+    """Delete a track. DESTRUCTIVE — removes all regions and plugins on the track. Requires `confirm=True`.
+
+    The deletion is undoable: pass the returned `commit_id` to `undo` to restore the
+    track (with its plugins, regions, and mixer state). The engine refuses the call
+    with INVALID_ARGUMENT if `confirm` is false, so a typo can't nuke a track.
+
+    Args:
+        track_id: Engine track id.
+        confirm: MUST be True. False (the default) returns INVALID_ARGUMENT.
+    """
+    try:
+        resp = await _client(ctx).delete_track(track_id, confirm=confirm)
+        return _to_dict(resp)
+    except grpc.aio.AioRpcError as e:
+        return _err("delete_track", e)
+
+
+@mcp.tool()
 async def rename_track(ctx: Context, track_id: str | int, name: str) -> dict[str, Any]:
     """Rename a track. Returns a `commit_id` you can pass to `undo` to revert.
 
@@ -196,6 +237,53 @@ async def undo(ctx: Context, commit_id: str = "") -> dict[str, Any]:
         return _to_dict(resp)
     except grpc.aio.AioRpcError as e:
         return _err("undo", e)
+
+
+# ============================================================================
+# Transport
+# ============================================================================
+
+
+@mcp.tool()
+async def play(ctx: Context) -> dict[str, Any]:
+    """Start playback from the current transport position. Returns commit_id (pass to undo to stop).
+
+    No-ops cleanly if playback is already running — the engine still returns a
+    commit_id but undo of it does nothing in that case.
+    """
+    try:
+        resp = await _client(ctx).play()
+        return _to_dict(resp)
+    except grpc.aio.AioRpcError as e:
+        return _err("play", e)
+
+
+@mcp.tool()
+async def stop(ctx: Context) -> dict[str, Any]:
+    """Stop playback. Returns commit_id (pass to undo to resume).
+
+    No-ops cleanly if playback was already stopped.
+    """
+    try:
+        resp = await _client(ctx).stop()
+        return _to_dict(resp)
+    except grpc.aio.AioRpcError as e:
+        return _err("stop", e)
+
+
+@mcp.tool()
+async def get_transport_state(ctx: Context) -> dict[str, Any]:
+    """Read the current transport state: is_playing, is_recording, position in seconds.
+
+    Returns a dict with `playing`, `recording`, and `position.seconds`. Bars/beats
+    aren't reported live yet — the engine leaves them at 0 until the tempo-sequence
+    helper lands.
+    """
+    try:
+        resp = await _client(ctx).get_transport_state()
+        return _to_dict(resp)
+    except grpc.aio.AioRpcError as e:
+        return _err("get_transport_state", e)
 
 
 # ============================================================================

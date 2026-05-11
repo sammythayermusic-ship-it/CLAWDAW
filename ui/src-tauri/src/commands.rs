@@ -5,7 +5,7 @@
 use tauri::{Emitter, State};
 use tonic::Request;
 
-use crate::dto::{CommitDto, EventDto, ProjectDto, TrackDto, TransportStateDto};
+use crate::dto::{AddTrackResultDto, CommitDto, EventDto, ProjectDto, TrackDto, TransportStateDto};
 use crate::engine::{EngineClient, UNARY_RPC_TIMEOUT};
 use crate::proto;
 
@@ -47,6 +47,52 @@ pub async fn get_track(
 // ---------------------------------------------------------------------------
 // Mutations — all return CommitDto for undo bookkeeping on the JS side
 // ---------------------------------------------------------------------------
+#[tauri::command]
+pub async fn engine_add_track(
+    engine: State<'_, EngineClient>,
+    track_type: String,
+    name: String,
+) -> Result<AddTrackResultDto, String> {
+    // Map the JS-side enum name ("AUDIO") to the proto TrackType int. v1
+    // only supports AUDIO; anything else is forwarded as-is and the engine
+    // returns INVALID_ARGUMENT.
+    let type_int = match track_type.as_str() {
+        "AUDIO" => proto::TrackType::Audio as i32,
+        "MIDI" => proto::TrackType::Midi as i32,
+        "AUX" => proto::TrackType::Aux as i32,
+        "BUS" => proto::TrackType::Bus as i32,
+        "FOLDER" => proto::TrackType::Folder as i32,
+        _ => proto::TrackType::Unspecified as i32,
+    };
+    let mut client = engine.client().await?;
+    let resp = client
+        .add_track(unary(proto::AddTrackRequest {
+            r#type: type_int,
+            name,
+            color: None,
+            insert_at_index: 0,
+        }))
+        .await
+        .map_err(|e| format!("AddTrack: {e}"))?;
+    Ok(resp.into_inner().into())
+}
+
+#[tauri::command]
+pub async fn engine_delete_track(
+    engine: State<'_, EngineClient>,
+    track_id: String,
+) -> Result<CommitDto, String> {
+    let mut client = engine.client().await?;
+    let resp = client
+        .delete_track(unary(proto::DeleteTrackRequest {
+            track_id,
+            confirm: true,
+        }))
+        .await
+        .map_err(|e| format!("DeleteTrack: {e}"))?;
+    Ok(resp.into_inner().into())
+}
+
 #[tauri::command]
 pub async fn rename_track(
     engine: State<'_, EngineClient>,

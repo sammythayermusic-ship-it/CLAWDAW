@@ -70,7 +70,19 @@ export function useEngineSync() {
             const trackId =
               "trackId" in event ? event.trackId : useEngineStore.getState().selectedTrackId;
             if (trackId) void refetchTrack(trackId);
-          } else if (event.kind === "trackAdded" || event.kind === "trackRemoved") {
+          } else if (event.kind === "trackAdded") {
+            // Refetch project to hydrate the new track summary, then
+            // auto-select the new track so its plugin chain panel opens.
+            const newId = event.trackId;
+            void (async () => {
+              await refetchProject();
+              useEngineStore.getState().setSelectedTrack(newId);
+            })();
+          } else if (event.kind === "trackRemoved") {
+            // The reducer already dropped the row + cleared selection if
+            // needed. Refresh the project to pick up index changes that
+            // would have happened on the engine side (currently a no-op
+            // for append-only flows, but cheap and keeps state honest).
             void refetchProject();
           }
         });

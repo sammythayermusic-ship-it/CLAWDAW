@@ -131,3 +131,85 @@
   font-style: italic;
   font-size: calc(var(--type-body-size) * 1px);
 }
+
+/* Row wrapper: positions the trash icon over the row. The wrapper is
+   the hover target so the icon appears whether the cursor is on the row
+   button or the icon itself. */
+.track-list-row-wrap {
+  position: relative;
+  list-style: none;
+}
+
+.track-list-row-delete {
+  position: absolute;
+  top: var(--space-px3);
+  right: var(--space-px3);
+  padding: 4px;
+  border: none;
+  border-radius: var(--radius-card);
+  background-color: transparent;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity var(--motion-hover) var(--ease-standard),
+    color var(--motion-hover) var(--ease-standard),
+    background-color var(--motion-hover) var(--ease-standard);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.track-list-row-wrap:hover .track-list-row-delete,
+.track-list-row-delete:focus-visible {
+  opacity: 1;
+}
+
+.track-list-row-delete:hover {
+  color: var(--color-text-primary);
+  background-color: rgb(from var(--color-text-primary) r g b / 0.08);
+}
+
+/* "+ add audio track" button at the bottom of the rail. Uses the same
+   glass-pebble look as the rows but a touch quieter — it's a secondary
+   action, the user's eye should land on tracks first. */
+.track-list-add {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-px2);
+  width: 100%;
+  padding: var(--space-px3) var(--space-px4);
+  border: none;
+  border-radius: var(--radius-card);
+  background-color: rgb(from var(--color-surface-glass-raised) r g b / 0.5);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-family: var(--font-text);
+  font-size: calc(var(--type-label-size) * 1px);
+  font-weight: var(--type-label-weight);
+  letter-spacing: var(--type-label-tracking);
+  text-transform: uppercase;
+  box-shadow:
+    inset 0 1px 0 var(--glass-edge-highlight),
+    var(--elevation-rest);
+  transition:
+    transform var(--motion-press) var(--ease-spring),
+    box-shadow var(--motion-hover) var(--ease-standard),
+    background-color var(--motion-hover) var(--ease-gentle),
+    color var(--motion-hover) var(--ease-standard);
+}
+
+.track-list-add:hover {
+  background-color: var(--color-surface-glass-raised);
+  color: var(--color-text-primary);
+  transform: translateY(-1px);
+  box-shadow:
+    inset 0 1px 0 var(--glass-edge-highlight),
+    var(--elevation-hover);
+}
+
+.track-list-add:active {
+  transform: translateY(0) scale(0.99);
+  box-shadow: var(--elevation-active);
+}
