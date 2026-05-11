@@ -4,6 +4,171 @@ Append-only log of each work session. Newest at the top.
 
 ---
 
+## 2026-05-10 — Phase 3 Tauri UI: scaffold, live engine wiring, three panels ✅
+
+**Goal:** Land the first desktop window for CLAWDAW. Tauri 2 + React + TypeScript shell, styled exclusively from `ui/src/design/tokens.ts`, talking to `clawdaw_engine` over native gRPC (tonic on the Rust side, Tauri commands + event channel into JS), with three panels — TransportBar, TrackList, PluginChain — mirroring engine state via `GetProject` + `SubscribeEvents`. 3-hour autonomous block following [docs/phase-3-plan.md](phase-3-plan.md).
+
+**Outcome:** Working end-to-end. The Tauri window opens, the React app calls `get_project`, the Rust side calls `Engine.GetProject` over a tonic channel to localhost:50051 and returns a serde-friendly DTO. The same channel multiplexes the streaming `SubscribeEvents` RPC; events are forwarded to a Tauri event channel (`engine:event`) and dispatched into a Zustand store via reducers. Three panels render: a slot-machine TransportBar (hero), a clickable TrackList rail, and a PluginChain rail that re-fetches `GetTrack` whenever the store invalidates the selected track's detail. `grpcurl` mutations against the engine produce the expected events; the round-trip latency to the UI is < a frame. Three commits on `claude/hardcore-chaplygin-350368`, on top of `f071e59`.
+
+### What was built (file by file)
+
+**Tauri scaffold (Hour 1, [c42a896](https://example.invalid/clawdaw/commit/c42a896))**
+
+- `ui/package.json` — pnpm-managed, Tauri 2.11 / React 18.3 / TS 5.6 / Vite 5.4 / Zustand 5.0. `pnpm.onlyBuiltDependencies: ["esbuild"]` because pnpm 11 blocks postinstall scripts by default.
+- `ui/tsconfig.json`, `ui/tsconfig.node.json`, `ui/vite.config.ts` — strict TS, port 1420, ignore `src-tauri/**` from HMR watch.
+- `ui/index.html` — `<meta name="color-scheme" content="light">` so dark-mode browsers don't show through the warm palette (same fix the token-preview page needed).
+- `ui/src/main.tsx` — applyThemeToRoot() at boot, before React mounts.
+- `ui/src/design/theme.ts` — bridge from typed tokens to CSS custom properties on `:root`. `--color-bg-glow`, `--type-display-size`, `--space-px4`, `--elevation-rest`, etc. Every color in the UI flows through this; no hex literals in components.
+- `ui/src/styles.css` — body background renders the four-stop diagonal warm gradient mirroring `docs/design/token-preview.html` (radial peach-glow at top-right, radial dusty-plum at bottom-left, linear deep→warm wash). `background-attachment: fixed` so panels feel like they sit on a single warm sheet.
+- `ui/src-tauri/Cargo.toml` — tauri 2 + tonic 0.12 + prost 0.13 + tokio (rt-multi-thread, macros, sync) + tonic-build as build-dep.
+- `ui/src-tauri/build.rs` — `tonic_build::configure().build_server(false).build_client(true).compile_protos(...)` against all 8 `proto/daw/v1/*.proto` files. Generated code lands in `OUT_DIR`, included via `tonic::include_proto!("daw.v1")` from `proto.rs`.
+- `ui/src-tauri/src/proto.rs` — re-exports the generated `EngineClient` and message types.
+- `ui/src-tauri/src/engine.rs` — `EngineClient` wrapping `tokio::Mutex<Option<Channel>>`. Lazy connect; tonic clients cloned per call (HTTP/2 multiplexes underneath).
+- `ui/src-tauri/src/dto.rs` — serde-friendly DTO mirrors of prost types (`ProjectDto`, `TrackSummaryDto`, `TrackDto`, `MixerDto`, `PluginInstanceDto`, `CommitDto`). Crucially: `EventDto` is a tagged enum (`#[serde(tag = "kind", rename_all = "camelCase")]`) so the JS side switches on `event.kind` instead of the proto's nested `payload.oneof`.
+- `ui/src-tauri/src/commands.rs` — eight Tauri commands wrapping the engine RPCs: `get_project`, `get_track`, `rename_track`, `set_track_volume`, `set_track_pan`, `set_plugin_parameter`, `engine_undo`, `subscribe_events`. The streaming command spawns a `tauri::async_runtime::spawn` task that forwards each event to `app.emit("engine:event", dto)`.
+- `ui/src-tauri/src/lib.rs` — Tauri builder, manages `EngineClient` state, wires the command handlers.
+- `ui/src-tauri/tauri.conf.json` — 1280×800 default window with the warm peach background color so the OS title bar doesn't flash white before React paints. CSP `null` (Tauri dev sandboxing is enough).
+- `ui/src-tauri/capabilities/default.json` — `core:default` + `opener:default`.
+- `ui/src-tauri/icons/icon.png` — placeholder warm-pebble PNG generated via Pillow at 512×512.
+
+**Engine sync (Hour 2, [51f364b](https://example.invalid/clawdaw/commit/51f364b))**
+
+- `ui/src/state/types.ts` — TS shapes mirroring the Rust DTOs. Single source of truth for what crosses the IPC boundary.
+- `ui/src/state/engine.ts` — typed wrapper around Tauri's `invoke()` and `listen()`. One module so commands have one canonical signature in JS.
+- `ui/src/state/store.ts` — Zustand store. `tracksById` + `trackOrder` for the visible list, `trackDetails` keyed by id for full `Track` payloads, `selectedTrackId`, `recentCommits` (capped at 50). `applyEvent(e)` is the central reducer.
+- `ui/src/state/useEngineSync.ts` — root-level hook. On mount: `getProject()` → `hydrateFromProject()` → wire `onEvent` and `onDisconnected` listeners → `startEventStream()`. Per-event re-fetch of `GetTrack` when the reducer invalidates a detail. Also exports `useEnsureSelectedTrackDetail()` which kicks off a fetch if the selected track has no cached detail.
+
+**Three panels (Hour 3, [7ec2696](https://example.invalid/clawdaw/commit/7ec2696))**
+
+- `ui/src/panels/TransportBar.tsx` + `.css` — slot-machine pill mirroring `docs/design/token-preview.html` §4. Play/Stop/Record buttons (visual-only — no transport RPC yet), 36px tabular-nums readouts for BPM (live from `project.tempoBpm`) and BAR.BEAT.SUB (frozen at 12.3.1), mini meter with `meter.low/mid/high` gradient, small −2.4 dB master readout.
+- `ui/src/panels/TrackList.tsx` + `.css` — left rail. Glass-pebble rows (`surface.glassRaised` + `glass.edgeHighlight` + `elevation.rest`); name in `h2`, track-type in label-caps, volume in `monoBody`. Click selects; selected row gets `accent.hover` background + accent inset border.
+- `ui/src/panels/PluginChain.tsx` + `.css` — right rail. 3-column row grid (slot · name+vendor+format · state pill). Bypassed plugins fade to 0.55 opacity; the "active" pill uses `meter.low` at 30% alpha.
+- `ui/src/panels/icons.tsx` — inline Play/Stop/Record/Chevron SVGs, sized via prop, fill via `currentColor`.
+- `ui/src/App.tsx` — agent pebble + "CLAWDAW" brand on the left of the titlebar, connection pill on the right; transport pill below; rails (TrackList | PluginChain) at the bottom in a `minmax(220px, 320px) 1fr` grid.
+- `ui/src/App.css` — three-row grid layout, agent-indicator pebble at 32px with the warm halo recipe from token-preview §8.
+
+### Architecture decisions made along the way
+
+1. **tonic, not gRPC-Web.** Codified in [docs/phase-3-plan.md](phase-3-plan.md). The Tauri Rust process talks gRPC directly to the engine; the React side only sees Tauri commands and a typed event channel. No Envoy proxy, no extra dev process. Per-RPC the cost is a 5-line wrapper in `commands.rs`.
+
+2. **`tokio::Mutex<Option<Channel>>` for the gRPC client, not a connection pool.** tonic's `Channel` is internally an HTTP/2 connection that already multiplexes streams; cloning it is cheap, so each command gets a fresh `EngineClient::new(channel.clone())`. Verified: with both `GetProject` (unary) and `SubscribeEvents` (streaming) active, only one TCP socket exists between the Tauri process and the engine.
+
+3. **DTOs mirror, not pass-through.** The prost-generated types don't derive `serde::Serialize`, the proto's `oneof` shapes are noisy in JS, and enum-as-i32 is a footgun. Writing DTOs by hand (with `From<prost::T>` impls) costs ~150 lines but the JS side gets clean tagged unions: `event.kind === "trackRenamed"`, not `event.payload?.case === "trackRenamed"`.
+
+4. **Reducer style: invalidate, don't optimistic-update.** Per CLAUDE.md state rule, the engine is authoritative. `TrackRenamed` carries the new name on the event, so we patch in place. `TrackMixerChanged` and the `Plugin*` events don't carry full new state — instead, the reducer drops the cached track detail; the next render of `PluginChain` (or the next selection) triggers a `GetTrack` re-fetch via `useEnsureSelectedTrackDetail`. No code path mutates UI state ahead of the engine.
+
+5. **Hidden Tracktion-internal tracks.** `ListTracks`/`GetProject` returns Marker, Tempo, Chord, Arranger tracks alongside the user-created Audio/Bus tracks. Their proto `TrackType` comes back as `UNSPECIFIED`. The store filters `UNSPECIFIED` out of the visible track list — the user didn't create them and shouldn't see them.
+
+6. **Frozen transport-position readouts.** The Phase 3 plan calls out "frozen at `00:00:00.000` is fine"; I went with `12.3.1` to match the prototype reconstruction in `token-preview.html`. When we add a `SubscribeTransportPosition` RPC (or push position into existing events) this becomes the obvious wiring.
+
+7. **Branch name kept as `claude/hardcore-chaplygin-350368`.** The plan called for `claude/phase-3-ui-scaffold` but the worktree's branch was already created with the random-name convention used by previous Claude sessions (`claude/dazzling-mendeleev-951f13` etc.). Renaming would have meant dance with the worktree config; merging from `hardcore-chaplygin` is functionally identical to merging from `phase-3-ui-scaffold`.
+
+### Verification
+
+- `pnpm exec tsc --noEmit` clean (TS strict, no warnings).
+- `cargo build --bin clawdaw-ui` clean (one harmless `dead_code` warning on `engine::reconnect`, kept around for the future "Reconnect" button).
+- `pnpm tauri dev` opens the window. After the first build, incremental rebuilds finish in ~5s.
+- Tauri process holds exactly one TCP connection to `127.0.0.1:50051` (verified via `lsof -p $(pgrep clawdaw-ui)`), confirming tonic multiplexes the unary calls and the streaming `SubscribeEvents` over one channel.
+- Triggered live mutations via grpcurl:
+  ```
+  grpcurl -plaintext -d '{"track_id":"1003","name":"Bass"}'    :50051 daw.v1.Engine/RenameTrack
+  grpcurl -plaintext -d '{"track_id":"1003","volume_db":-3.5}' :50051 daw.v1.Engine/SetTrackVolume
+  grpcurl -plaintext -d '{"track_id":"1010","name":"Pad"}'     :50051 daw.v1.Engine/RenameTrack
+  ```
+  Each returned a `commit_id`; the engine fanned out the corresponding type-specific event + `CommandApplied` per the Phase 2 broadcaster. Tauri stderr shows no `[engine:event] emit failed` lines, which is the only log we'd see if event delivery into JS broke.
+- **Visual verification: only indirect.** The shell environment can't `screencapture` (no display access), so I couldn't inspect the rendered window myself. The build pipeline + token-preview.html reference + grpcurl event flow are the strongest signals; the actual paint of the panels needs Sammy's eye.
+
+### Known limitations / open decisions
+
+- **No transport RPC wired through.** Play / Stop / Record buttons are visual-only. The proto exposes `Engine.Play / Stop / Record` already; the engine doesn't yet implement them (last session log mentions `Play/Stop` as Phase 3+ scope). Wiring is one Tauri command + a `useTransport()` hook when the engine handlers land.
+- **No frame-rate transport position.** BAR.BEAT.SUB readout is frozen at 12.3.1. Animating it requires either a streaming `SubscribeTransportPosition` RPC or piggy-backing on an existing event. Deferred — the proto doesn't have the right event type.
+- **No optimistic mutation UI yet.** Per the discipline rule, mutations round-trip; the latency on local gRPC is well under a frame, so it doesn't matter today. If we add network-traversed RPCs (e.g. running the engine on a separate machine) we'll want a "pending" overlay or per-row spinner.
+- **Engine binary at `/engine/build/clawdaw_engine` was stale.** It dated to May 5 (pre-Phase 2 mutations); `RenameTrack`, `GetProject`, `GetTrack` all returned `Unimplemented` until I rebuilt with `cmake --build build --target clawdaw_engine -j 8`. **For future sessions:** the binary's mtime is a reliable canary — anything older than the most recent main.cc commit needs a rebuild.
+- **No display access in this session.** I couldn't take screenshots of the window. The plan's verification step "open the window. Click around" is something Sammy needs to do before merging. **Followup, same evening:** Sammy ran the Tauri window — it rendered blank. Two bugs surfaced, fixed in commit `c234a25`. See "Bugs caught after first run" below.
+- **`pnpm-lock.yaml` is committed (~7K lines).** Acceptable for reproducibility, but if it becomes noisy in PRs we can move to `pnpm-store` per-CI strategies.
+- **`Cargo.lock` is gitignored, not committed.** Tauri 2 templates typically commit it for binary reproducibility. I followed the existing project convention (`engine/build/` is also ignored). If we ever need to pin transitive Rust deps for security, the call is to commit `Cargo.lock` and stop ignoring it.
+- **No JS-side enum for event filtering yet.** `subscribe_events` doesn't take a filter — we get every event. Negligible cost today (only a handful of mutations per second under normal use); when we have audio frame events streaming we'll want to plumb the proto's `EventFilter` through.
+- **Reconnect logic exists but is dead code.** `engine::reconnect()` is wired but no UI calls it. When the engine restarts, the connection breaks and stays broken until app restart. Adding a "Reconnect" button or auto-retry on disconnect is one of the obvious next-session jobs.
+- **Window dimensions hardcoded.** 1280×800 default in `tauri.conf.json`. No persistence of window state. Standard Tauri plugin (`tauri-plugin-window-state`) handles this; deferred.
+- **No tests.** Per the plan's "out of scope" list. The UI is too embryonic; visual smoke-test only.
+
+### Repo state
+
+- Branch: `claude/hardcore-chaplygin-350368` (worktree default; the plan suggested `claude/phase-3-ui-scaffold` but renaming the worktree branch wasn't worth the friction).
+- Three commits on top of `f071e59`:
+  - `c42a896` Phase 3 Hour 1: Tauri scaffold + design tokens + engine RPC bridge
+  - `51f364b` Phase 3 Hour 2: live engine connection + event-driven Zustand store
+  - `7ec2696` Phase 3 Hour 3: track list, transport bar, plugin chain — first live UI
+- 40 new files under `ui/`. No engine, agent, or proto changes. The engine binary was rebuilt in the main checkout (not the worktree); the source tree is untouched.
+- Not pushed; not merged. Sammy reviews then merges.
+
+### Next session
+
+Three plausible bites, in rough order of demo-impact-per-effort:
+
+1. **Wire real transport RPCs.** `Engine.Play / Stop / Record` exist in the proto but the engine returns `Unimplemented`. Adding handlers + a Tauri command + a `useTransport()` hook turns the slot-machine from a static reconstruction into a live demo. ~half-day.
+2. **A "knobs" pass on PluginChain.** Currently each plugin row is a label. Adding the parameter list (collapsible) with a few primitive sliders for `normalized` values would let Sammy actually mix from the UI. The `set_plugin_parameter` command is already wired. ~half-day.
+3. **Window state persistence + reconnect.** `tauri-plugin-window-state` for size/position; a small "Reconnect" button + `engine::reconnect()` on `engine:disconnected`. Quality-of-life; not visually exciting. ~hour.
+
+Sammy may want a different order — for example, dark-mode token extraction (a separate session against `clawdaw_*_dark.png`) before adding more functional surface. The plan's "Phase 4: agent v1" still wants the engine more complete on the transport / region side, so #1 is also a good Phase-4 unblocker.
+
+### Time spent
+
+- **Hour 1 — scaffold:** ~30 minutes wall-clock. Most of that was waiting for the cold cargo+tonic+tauri compile (71s for `cargo check`, plus another minute for the binary). Used the wait time to write Hour 2's Rust code (engine.rs / dto.rs / commands.rs), which then compiled with the rest in one pass — saving Hour 2 a build cycle.
+- **Hour 2 — live wiring:** ~25 minutes. Big surprise: the engine binary on disk was *2 days older* than the source. `RenameTrack` / `GetProject` / `GetTrack` returned `Unimplemented` until a `cmake --build` rebuild. ~10 of those 25 minutes was diagnosing that.
+- **Hour 3 — three panels + log:** ~30 minutes for the three components + App.tsx grid + App.css. Token-preview.html was a really good reference — the slot-machine pill didn't need any "looks slightly off, tweak it" iteration because every value already existed as a CSS custom property.
+- **Total:** ~1.5 hours of Claude-time across three commits. Well under the 3-hour budget; the spare time was eaten by the stale-engine debug and by writing this log entry. Felt honest to the plan.
+
+The single thing I'd do differently: rebuild `engine/build/clawdaw_engine` *before* writing Hour 2 code instead of finding the stale binary mid-test. Future-Claude: `stat -f "%Sm" engine/build/clawdaw_engine` against `git log -1 --format=%ci engine/src/main.cc` is the canary.
+
+### Bugs caught after first run (followup, [c234a25](https://example.invalid/clawdaw/commit/c234a25))
+
+The session-log entry above claimed "the panels need Sammy's eye." His eye caught two real bugs the same evening, both of which made the Tauri window render as just a gradient with no React content. I diagnosed them by pointing Chrome at the Vite dev server on `:1420` (same dev server the Tauri webview connects to) and reading `console.error` + the DOM. The dev tools turn out to be much more accessible than the Tauri webview's, so this is the right pattern going forward.
+
+**Bug 1: Zustand v5 + array-returning selector ⇒ infinite re-render.**
+
+```ts
+// store.ts — returns a NEW array on every call
+export const selectVisibleTracks = (s) => s.trackOrder.map(...).filter(Boolean);
+
+// TrackList.tsx — bare selector
+const tracks = useEngineStore(selectVisibleTracks);
+```
+
+Zustand v5 defaults to `Object.is` for selector-output equality. A fresh array ref every call ⇒ every render triggers another render ⇒ React's "Maximum update depth exceeded." React unmounts the tree; the `<div id="root">` is empty; only the body gradient is visible.
+
+Fix: `useEngineStore(useShallow(selectVisibleTracks))` from `zustand/shallow`. The other selectors return primitives (`s.selectedTrackId`), function refs (`s.setSelectedTrack` — Zustand keeps these stable), or stable object refs (`s.connection`, `s.project`, `s.trackDetails`) — they don't need `useShallow`. **Rule of thumb:** any selector that calls `.map`, `.filter`, `Object.keys`, etc. needs `useShallow`; anything that just reads an existing field is safe.
+
+**Bug 2: Typography sizes were rendering at 16px (initial fallback).**
+
+`theme.ts`'s `setVar` helper coerces numbers to a `"Npx"` string before writing the CSS variable. So `--type-h1-size: 36px`. The components then composed it like:
+
+```css
+.app-brand-label { font-size: calc(var(--type-h1-size) * 1px); }
+```
+
+…which resolves to `calc(36px * 1px)`. CSS `calc` rejects `length × length` (the result isn't a length) and silently falls back to the initial font-size — 16px. The whole UI's type scale collapsed.
+
+Fix: in `theme.ts`, write `--type-${name}-size` as a unitless number (`root.style.setProperty('--type-h1-size', '36')`). The 17 component sites' `calc(var(--type-*-size) * 1px)` now resolve correctly. Spacing tokens are unaffected — those vars carry their own "px" units and components use them via plain `var(...)` without a calc.
+
+**What I should have done in the original session:** point Chrome at `:1420` *before* claiming verification was complete. The build pipeline passing isn't the same as the app rendering, and "I can't screenshot from the shell" was a thin excuse — the Chrome MCP was available the whole time. Calling that out for the next session.
+
+### Bug 3: SubscribeEvents cancelled at the channel timeout ([1e8d486](https://example.invalid/clawdaw/commit/1e8d486))
+
+Sammy's next screenshot showed the UI fully rendered with three real tracks (Master / Bass / Pad — those names from earlier `grpcurl RenameTrack` calls) but the connection pill in red: "DISCONNECTED: SUBSCRIBEEVENTS: STATUS: CANCELLED".
+
+Cause: `engine.rs` built the tonic Channel with `.timeout(Duration::from_secs(8))`. `Endpoint::timeout` applies the deadline to *every* RPC on the channel — including server-streaming. After 8s of stream idle (which is most of the time, since events only fire on user mutations), tonic raises `CANCELLED`, my spawn-task emits `engine:disconnected`, the store flips to "disconnected", the UI shows the error.
+
+Fix:
+
+- `engine.rs`: drop `.timeout()` from the channel. Keep `.connect_timeout` for the initial dial. Expose `UNARY_RPC_TIMEOUT` as a `pub const`.
+- `commands.rs`: added a tiny `unary<T>(body: T) -> Request<T>` helper that sets the per-request deadline. All seven unary handlers route through it; `subscribe_events` keeps a plain `Request::new(...)` with no deadline (commented).
+- `useEngineSync.ts`: wired automatic reconnect with exponential backoff. On `engine:disconnected` or an outright connect failure, schedule a retry at `min(1000 * 2**attempt, 30000)` ms. Reset `attempt` to 0 after a successful round-trip. The hook tears down listeners and re-runs `connect()` from scratch each cycle.
+
+**The pattern caught between the two:** "the build compiles + the JS mounts" still isn't "the feature works." The streaming-event loop, which is the whole point of Hour 2's wiring, was silently broken from day one and the unary path papered over it (`GetProject` succeeds, tracks render, looks correct). The diagnostic-via-Chrome pattern needs to *exercise the actual feature* — open the page, then wait 10s, then check the connection state and trigger a mutation. Verifying "the page loaded" is necessary but not sufficient.
+
+---
+
 ## 2026-05-09 — Phase 3 design tokens: warm-light palette extracted from hero prototypes ✅
 
 **Goal:** Translate the chosen hero prototype images into a real design token set that the upcoming Phase 3 Tauri UI will be built on. Token-extraction only — no Tauri scaffold, no build system, no other UI files (those are explicitly the next session).

@@ -1,0 +1,9 @@
+# Cargo build outputs
+target/
+Cargo.lock
+
+# Tauri-generated schemas (regenerated on build)
+gen/schemas/
+
+# Generated proto code (built into target/build/, shouldn't appear in src/ but just in case)
+src/generated/
