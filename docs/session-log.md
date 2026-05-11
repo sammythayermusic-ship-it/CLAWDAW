@@ -153,6 +153,20 @@ Fix: in `theme.ts`, write `--type-${name}-size` as a unitless number (`root.styl
 
 **What I should have done in the original session:** point Chrome at `:1420` *before* claiming verification was complete. The build pipeline passing isn't the same as the app rendering, and "I can't screenshot from the shell" was a thin excuse — the Chrome MCP was available the whole time. Calling that out for the next session.
 
+### Bug 3: SubscribeEvents cancelled at the channel timeout ([1e8d486](https://example.invalid/clawdaw/commit/1e8d486))
+
+Sammy's next screenshot showed the UI fully rendered with three real tracks (Master / Bass / Pad — those names from earlier `grpcurl RenameTrack` calls) but the connection pill in red: "DISCONNECTED: SUBSCRIBEEVENTS: STATUS: CANCELLED".
+
+Cause: `engine.rs` built the tonic Channel with `.timeout(Duration::from_secs(8))`. `Endpoint::timeout` applies the deadline to *every* RPC on the channel — including server-streaming. After 8s of stream idle (which is most of the time, since events only fire on user mutations), tonic raises `CANCELLED`, my spawn-task emits `engine:disconnected`, the store flips to "disconnected", the UI shows the error.
+
+Fix:
+
+- `engine.rs`: drop `.timeout()` from the channel. Keep `.connect_timeout` for the initial dial. Expose `UNARY_RPC_TIMEOUT` as a `pub const`.
+- `commands.rs`: added a tiny `unary<T>(body: T) -> Request<T>` helper that sets the per-request deadline. All seven unary handlers route through it; `subscribe_events` keeps a plain `Request::new(...)` with no deadline (commented).
+- `useEngineSync.ts`: wired automatic reconnect with exponential backoff. On `engine:disconnected` or an outright connect failure, schedule a retry at `min(1000 * 2**attempt, 30000)` ms. Reset `attempt` to 0 after a successful round-trip. The hook tears down listeners and re-runs `connect()` from scratch each cycle.
+
+**The pattern caught between the two:** "the build compiles + the JS mounts" still isn't "the feature works." The streaming-event loop, which is the whole point of Hour 2's wiring, was silently broken from day one and the unary path papered over it (`GetProject` succeeds, tracks render, looks correct). The diagnostic-via-Chrome pattern needs to *exercise the actual feature* — open the page, then wait 10s, then check the connection state and trigger a mutation. Verifying "the page loaded" is necessary but not sufficient.
+
 ---
 
 ## 2026-05-09 — Phase 3 design tokens: warm-light palette extracted from hero prototypes ✅
