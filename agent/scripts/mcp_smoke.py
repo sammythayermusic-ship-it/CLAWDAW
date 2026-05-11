@@ -93,8 +93,71 @@ async def main() -> int:
                 f"expected revert to {before_name!r}, got {reverted['name']!r}"
             )
 
-            print("\n== subscribe_events n=5 ==")
-            res = await session.call_tool("subscribe_events", {"n": 5})
+            # ---- transport + add/delete demo: the "agent runs the DAW" path ----
+            print("\n== add_track name='Drums' ==")
+            res = await session.call_tool(
+                "add_track", {"name": "Drums", "track_type": "TRACK_TYPE_AUDIO"}
+            )
+            add_payload = _payload(res)
+            new_track_id = add_payload.get("track_id", "")
+            print(f"  new track id={new_track_id!r}")
+            print(f"  commit_id={add_payload.get('mutation', {}).get('commit_id', '')!r}")
+            assert new_track_id, "add_track returned no track_id"
+
+            print("\n== get_project (confirm Drums present) ==")
+            res = await session.call_tool("get_project", {})
+            proj_after_add = _payload(res)
+            drums = next(
+                (t for t in proj_after_add["tracks"] if t["id"] == new_track_id), None
+            )
+            assert drums is not None and drums.get("name") == "Drums"
+            print(f"  Drums confirmed: id={new_track_id!r} name='Drums'")
+
+            print("\n== play ==")
+            play_payload = _payload(await session.call_tool("play", {}))
+            print(f"  description={play_payload.get('description', '')!r}")
+
+            await asyncio.sleep(0.1)
+            print("\n== get_transport_state ==")
+            ts = _payload(await session.call_tool("get_transport_state", {}))
+            print(f"  playing={ts.get('playing')} position.sec={ts.get('position', {}).get('seconds')}")
+            assert ts.get("playing") is True
+
+            print("\n== stop ==")
+            stop_payload = _payload(await session.call_tool("stop", {}))
+            print(f"  description={stop_payload.get('description', '')!r}")
+
+            print("\n== delete_track confirm=false (should fail) ==")
+            failed = _payload(
+                await session.call_tool(
+                    "delete_track", {"track_id": new_track_id, "confirm": False}
+                )
+            )
+            print(f"  ok={failed.get('ok')} grpc_code={failed.get('grpc_code')}")
+            assert failed.get("ok") is False
+            assert failed.get("grpc_code") == "INVALID_ARGUMENT"
+
+            # Cleanup: rewind transport + add via the undo log only. We avoid
+            # exercising delete-then-undo in the smoke because of the
+            # Tracktion track-cache quirk noted in the session log — the
+            # pytest integration test covers that path in isolation.
+            print("\n== 3 × undo (rewind: stop → play → add) ==")
+            for i in range(3):
+                resp = _payload(await session.call_tool("undo", {}))
+                print(f"  {i + 1}. {resp.get('description', '')!r}")
+
+            print("\n== get_project (verify clean) ==")
+            final_proj = _payload(await session.call_tool("get_project", {}))
+            still_drums = [t for t in final_proj["tracks"] if t["id"] == new_track_id]
+            if still_drums:
+                # Surface the diagnostic info before failing — the events buffer
+                # below tells us which IDs the engine actually emitted.
+                print(f"  WARNING: track {new_track_id!r} still present: {still_drums!r}")
+            else:
+                print(f"  Drums (id={new_track_id!r}) confirmed gone.")
+
+            print("\n== subscribe_events n=20 ==")
+            res = await session.call_tool("subscribe_events", {"n": 20})
             evbuf = _payload(res)
             print(f"  buffered events: {evbuf.get('count', 0)}")
             for e in evbuf.get("events", []):

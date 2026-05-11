@@ -40,6 +40,86 @@ async def client():
 
 
 @pytest.mark.integration
+async def test_transport_play_stop_round_trip(client: EngineClient) -> None:
+    """play() → poll get_transport_state → stop() → poll again.
+
+    Sleeps briefly between play and the poll so the transport has time to
+    actually start (the engine's mutation returns once the call is dispatched,
+    not once playback is audible).
+    """
+    initial = await client.get_transport_state()
+    assert initial.playing is False, "engine started with playback already running"
+
+    mutation = await client.play()
+    assert mutation.commit_id, "play returned no commit_id"
+    await asyncio.sleep(0.1)
+
+    after_play = await client.get_transport_state()
+    assert after_play.playing is True, (
+        f"expected playing=True after play(), got {after_play!r}"
+    )
+
+    stop_mutation = await client.stop()
+    assert stop_mutation.commit_id, "stop returned no commit_id"
+    await asyncio.sleep(0.05)
+
+    after_stop = await client.get_transport_state()
+    assert after_stop.playing is False, (
+        f"expected playing=False after stop(), got {after_stop!r}"
+    )
+
+
+@pytest.mark.integration
+async def test_add_track_and_delete_round_trip_and_undo(client: EngineClient) -> None:
+    """add_track('TestTrack') → get_project (confirm) → delete_track confirm=true →
+    get_project (confirm gone) → undo (restore) → undo (re-delete the add).
+
+    Also asserts that delete_track with confirm=False is rejected with
+    INVALID_ARGUMENT — the destructive-op gate.
+    """
+    before = await client.get_project()
+    before_ids = {t.id for t in before.tracks}
+
+    # Create
+    add_resp = await client.add_track(name="pytest_phase5_track")
+    assert add_resp.track_id, "add_track returned no track_id"
+    assert add_resp.mutation.commit_id, "add_track mutation has no commit_id"
+    new_id = add_resp.track_id
+
+    after_add = await client.get_project()
+    new_ids = {t.id for t in after_add.tracks}
+    assert new_id in new_ids - before_ids, (
+        f"expected new track id {new_id!r} in project after add, didn't find it"
+    )
+    by_id = {t.id: t for t in after_add.tracks}
+    assert by_id[new_id].name == "pytest_phase5_track"
+
+    # confirm=False must fail
+    with pytest.raises(grpc.aio.AioRpcError) as excinfo:
+        await client.delete_track(new_id, confirm=False)
+    assert excinfo.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+
+    # confirm=True deletes
+    del_mut = await client.delete_track(new_id, confirm=True)
+    assert del_mut.commit_id
+
+    after_delete = await client.get_project()
+    assert new_id not in {t.id for t in after_delete.tracks}
+
+    # Undo delete restores the track
+    await client.undo()
+    after_restore = await client.get_project()
+    by_id = {t.id: t for t in after_restore.tracks}
+    assert new_id in by_id, "undo did not restore the deleted track"
+    assert by_id[new_id].name == "pytest_phase5_track"
+
+    # Undo add removes it cleanly so the test leaves the project as it found it
+    await client.undo()
+    after_undo_add = await client.get_project()
+    assert new_id not in {t.id for t in after_undo_add.tracks}
+
+
+@pytest.mark.integration
 async def test_rename_track_round_trip_and_undo(client: EngineClient) -> None:
     """get_project → rename one track → confirm rename via second get_project → undo → confirm revert.
 
