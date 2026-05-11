@@ -21,8 +21,17 @@ DerivedData/
 # docs/session-log.md.
 engine/third_party/
 
-# Generated proto/gRPC code. Regenerate with `cd proto && buf generate`
-# (runs all three target plugins; outputs go here).
+# Generated proto/gRPC code. Engine (C++) and UI (TS) regenerate with
+# `cd proto && buf generate`. Python regenerates locally via
+# `agent/scripts/regen-proto.sh` (uses the venv's grpc_tools.protoc so
+# the gencode version matches the runtime — see that script for context).
 engine/generated/
 agent/generated/
 ui/src/generated/
+
+# Python tooling — the venv is per-machine; uv.lock is committed.
+agent/.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
