@@ -1,0 +1,50 @@
+[project]
+name = "clawdaw-agent"
+version = "0.1.0"
+description = "MCP server that exposes the CLAWDAW audio engine to Claude as tools."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=1.2.0",
+    "grpcio>=1.66.0",
+    # Must match the runtime version that grpc_tools.protoc emitted the stubs
+    # against (see scripts/regen-proto.sh). The latest PyPI release is 6.33.6;
+    # the buf cloud python plugin emits 7.34.1 gencode which has no runtime
+    # on PyPI yet — that's why we regen locally instead of via `buf generate`.
+    "protobuf>=6.33,<7",
+]
+
+[project.scripts]
+clawdaw-agent = "clawdaw_agent.server:main"
+
+[dependency-groups]
+dev = [
+    "grpcio-tools>=1.66.0",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.6.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/clawdaw_agent", "generated/daw"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = [
+    "integration: requires a running clawdaw_engine on 127.0.0.1:50051",
+]
+testpaths = ["tests"]
+
+[tool.ruff]
+# Slightly above the usual 100 — MCP tool docstrings benefit from staying on
+# one line so the LLM client sees them as a coherent sentence.
+line-length = 120
+target-version = "py311"
+extend-exclude = ["generated"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "W"]
