@@ -2,6 +2,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <csignal>
+#include <cstdio>
 #include <deque>
 #include <functional>
 #include <future>
@@ -23,6 +24,7 @@
 #include "daw/v1/project.pb.h"
 #include "daw/v1/common.pb.h"
 #include "daw/v1/plugin.pb.h"
+#include "daw/v1/transport.pb.h"
 #include "daw/v1/events.pb.h"
 
 namespace te = tracktion::engine;
@@ -633,6 +635,82 @@ public:
         }
 
         fillMutationResult(response, makeCommitId(), "Undo: " + entry.description);
+        return grpc::Status::OK;
+    }
+
+    // -------- Transport --------
+    //
+    // Play/Stop are simple message-thread calls into Tracktion's
+    // TransportControl. We don't emit a TransportStateChanged event yet —
+    // the UI updates optimistically. Once a second caller (e.g. the agent)
+    // can race with the UI we'll plumb the event through.
+
+    grpc::Status Play(grpc::ServerContext* /*context*/,
+                      const google::protobuf::Empty* /*request*/,
+                      daw::v1::MutationResult* response) override {
+        auto& transport = edit_.getTransport();
+        const auto commit_id = makeCommitId();
+        const bool wasPlaying = transport.isPlaying();
+        const double positionSec = transport.getPosition().inSeconds();
+
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "Started playback at %.3fs", positionSec);
+        const std::string description = buf;
+
+        runOnMessageThread([&] { transport.play(false); });
+
+        // Undo: if we actually started playback, stop. If transport was
+        // already playing, undo is a no-op (we don't want to stop something
+        // that was already running before the caller's command).
+        if (! wasPlaying) {
+            pushUndo(commit_id, description, [this] {
+                runOnMessageThread([this] { edit_.getTransport().stop(false, false); });
+            });
+        } else {
+            pushUndo(commit_id, description, []{});
+        }
+
+        emitCommandApplied(commit_id, description);
+        fillMutationResult(response, commit_id, description);
+        return grpc::Status::OK;
+    }
+
+    grpc::Status Stop(grpc::ServerContext* /*context*/,
+                      const google::protobuf::Empty* /*request*/,
+                      daw::v1::MutationResult* response) override {
+        auto& transport = edit_.getTransport();
+        const auto commit_id = makeCommitId();
+        const bool wasPlaying = transport.isPlaying();
+        const std::string description = "Stopped playback";
+
+        // discardRecordings=false: keep any in-progress recording's audio.
+        // clearDevices=false: don't tear down the playback graph; we'll
+        // restart soon.
+        runOnMessageThread([&] { transport.stop(false, false); });
+
+        if (wasPlaying) {
+            pushUndo(commit_id, description, [this] {
+                runOnMessageThread([this] { edit_.getTransport().play(false); });
+            });
+        } else {
+            pushUndo(commit_id, description, []{});
+        }
+
+        emitCommandApplied(commit_id, description);
+        fillMutationResult(response, commit_id, description);
+        return grpc::Status::OK;
+    }
+
+    grpc::Status GetTransportState(grpc::ServerContext* /*context*/,
+                                   const google::protobuf::Empty* /*request*/,
+                                   daw::v1::TransportState* response) override {
+        auto& transport = edit_.getTransport();
+        response->set_playing(transport.isPlaying());
+        response->set_recording(transport.isRecording());
+        // Position: seconds only for now. The proto's TimePosition.bars is
+        // left at 0 — the UI doesn't render bars live yet, and computing
+        // them needs a tempo-sequence lookup we don't have a helper for.
+        setProtoTime(response->mutable_position(), transport.getPosition());
         return grpc::Status::OK;
     }
 

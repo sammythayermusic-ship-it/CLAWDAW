@@ -4,6 +4,109 @@ Append-only log of each work session. Newest at the top.
 
 ---
 
+## 2026-05-11 — Transport Play/Stop: engine handlers + Tauri commands + wired buttons ✅
+
+**Goal:** Make the Play and Stop buttons in the UI's transport pill actually work. Implement `Engine.Play`, `Engine.Stop`, and `Engine.GetTransportState` handlers in the engine; wire Tauri commands; hook the existing buttons in `TransportBar.tsx`. End state: clicking Play in the Tauri window starts playback in the engine; clicking Stop stops it. 1-hour cap.
+
+**Outcome:** Working. The three RPCs are live and verified end-to-end against the running engine via grpcurl — `Play` flips `isPlaying` to true, the transport position advances, `Stop` flips it back, and `Undo` on a Stop re-plays. `CommandApplied` events flow through the broadcaster for both. The UI has three new Tauri commands (`engine_play`, `engine_stop`, `engine_get_transport_state`), a `transport: { isPlaying }` slice in the Zustand store updated optimistically from the button onClick, and a Play button that swaps to a pause glyph and a lit gold accent face when playing. Branch `claude/transport-play-stop`, two commits on top of `16b46da`.
+
+### What was built
+
+**Engine ([engine/src/main.cc](engine/src/main.cc))** — three new handlers slotted in between `Undo` and the Plugins section:
+
+- `Play(Empty) → MutationResult` — calls `transport.play(false)` on the message thread. Captures `wasPlaying` before the call; pushes an undo closure that calls `transport.stop(false, false)` if play actually started something, or a no-op closure if it was already playing. Emits `CommandApplied` with description `"Started playback at X.XXXs"` using the position at start.
+- `Stop(Empty) → MutationResult` — calls `transport.stop(false, false)` (discardRecordings=false, clearDevices=false). Same wasPlaying-aware undo: re-plays if Stop actually halted something, no-op if Stop was a no-op. Description `"Stopped playback"`.
+- `GetTransportState(Empty) → TransportState` — `playing`/`recording`/`position` filled from `transport.isPlaying()`, `transport.isRecording()`, `transport.getPosition().inSeconds()`. `position.bars` stays zero — the UI doesn't render bars live yet, and computing them needs a tempo-sequence lookup we don't have a helper for.
+
+Implementation matches the existing pattern: `runOnMessageThread` (`MessageManagerLock`) for the mutations, `pushUndo` for the closure, `emitCommandApplied` for the bookkeeping event. **No** `TransportStateChanged` event — see the optimistic-UI note below. Single new include (`cstdio`, for snprintf in the play description).
+
+**UI Rust ([ui/src-tauri/](ui/src-tauri/))**
+
+- `dto.rs` — new `TransportStateDto { playing, recording, positionSeconds }` (camelCase) + `From<proto::TransportState>` impl that flattens `position.seconds` to `position_seconds`.
+- `commands.rs` — three new commands (`engine_play`, `engine_stop`, `engine_get_transport_state`) routed through the existing `unary()` helper so each gets the standard 8s per-RPC deadline.
+- `lib.rs` — three handlers added to the `invoke_handler!` registry.
+
+**UI JS ([ui/src/](ui/src/))**
+
+- `state/types.ts` — `TransportStateDto` mirror.
+- `state/engine.ts` — `engineApi.play()`, `.stop()`, `.getTransportState()` typed wrappers.
+- `state/store.ts` — `transport: { isPlaying: boolean }` slice + `setTransportPlaying(playing)` action. Initial value `false`. **Not** updated from events — see optimistic-UI note.
+- `panels/TransportBar.tsx` — Play button onClick toggles between `engineApi.play()` and `engineApi.stop()` based on current `isPlaying`; Stop button always calls `.stop()`. Both flip the store optimistically before the RPC fires and roll back if the RPC errors. Play button swaps to a new `PauseIcon` and gains class `transport-btn--play-active` when playing.
+- `panels/icons.tsx` — new `PauseIcon` (two rounded rects in a 16×16 viewBox).
+- `panels/TransportBar.css` — `.transport-btn--play-active` overrides background to `var(--color-accent-active)` with intensified inner glow. No new tokens; uses existing accent.
+
+### Verification
+
+Engine smoke against the running binary (`./engine/build/clawdaw_engine 127.0.0.1:50091`):
+
+```
+$ grpcurl -plaintext :50091 daw.v1.Engine/GetTransportState
+{ "position": {} }                          # playing defaults to false
+
+$ grpcurl -plaintext :50091 daw.v1.Engine/Play
+{ "commitId": "...", "description": "Started playback at 0.000s" }
+
+$ grpcurl -plaintext :50091 daw.v1.Engine/GetTransportState
+{ "playing": true, "position": {} }
+
+$ grpcurl -plaintext :50091 daw.v1.Engine/Stop
+{ "commitId": "...", "description": "Stopped playback" }
+
+$ grpcurl -plaintext :50091 daw.v1.Engine/Undo
+{ "commitId": "...", "description": "Undo: Stopped playback" }
+
+$ grpcurl -plaintext :50091 daw.v1.Engine/GetTransportState
+{ "playing": true, "position": { "seconds": 0.0213 } }  # position advanced!
+```
+
+`SubscribeEvents` with no filter sees a `commandApplied` event for both the Play and the Stop, with descriptions matching the `MutationResult`s.
+
+Build hygiene:
+- `cd engine && cmake --build build --target clawdaw_engine -j 8` → 100% built, no new compile warnings (only the pre-existing macOS-version linker warnings from abseil dylibs, unrelated to this change).
+- `cd ui/src-tauri && cargo check` → clean, only the pre-existing `engine::reconnect is never used` warning.
+- `cd ui && ./node_modules/.bin/tsc --noEmit` → clean.
+- `cd ui && ./node_modules/.bin/vite build` → 53 modules, 295ms, no errors.
+
+### Decisions
+
+1. **No `TransportStateChanged` event emission.** The proto already declares the event type, but no handler emits it. Reason: with only one caller (the UI), optimistic update from the button onClick is good enough — when the agent (or a second UI client) can race with the user's clicks, we'll wire the engine event through and switch the store to a mirror. Plumbing an event for which there's only one writer just adds latency.
+
+2. **No-op undo closures for no-op Play/Stop.** If Play is called when already playing, or Stop when already stopped, the RPC still returns a valid `commit_id` and we still push *something* onto the undo log so a subsequent `Undo` consumes it cleanly. The closure is empty. Agents that issue commands without first checking transport state shouldn't get a "phantom" undo of the previous mutation.
+
+3. **`runOnMessageThread` (MessageManagerLock) over `runOnMessageThreadSync` (callAsync).** Transport play/stop are simple Tracktion calls — no AU plugin lifecycle, no audio-device teardown. The `MessageManagerLock` path is cheaper and works; the callAsync path is reserved for plugin instantiation per the Phase 2 decision in main.cc.
+
+4. **Position description format.** `"Started playback at 0.000s"`. The original plan suggested `<bar>.<beat>` but bars require a tempo-sequence lookup and the UI doesn't render bar/beat live yet. Seconds is honest, brief, and visible in the recent-commits panel that already renders `description`.
+
+5. **Pause icon, not "active Play" glyph.** When playing, the button swaps from a triangle to a pause symbol so the affordance reads as "click to pause" rather than "this is playing." Universal across DAWs; matches user expectation.
+
+### Known limitations
+
+- **Visual verification incomplete.** TypeScript + Rust + Vite all compile clean and the engine RPCs are end-to-end verified via grpcurl, but I didn't open the Tauri window to physically click Play. Same shell-environment constraint as Phase 3 — no display access. Sammy should `cd ui && pnpm tauri dev`, click Play, and confirm: (a) the icon swaps to pause, (b) the button gets a lit gold accent face, (c) `grpcurl GetTransportState` against the engine while the UI is open reports `playing: true`. The Phase 3 followup lesson applies: "the build compiles + the JS mounts" still isn't "the feature works."
+- **Audio output not validated.** The transport advances in software (`position.seconds` increments after Play), but I didn't put my ear on speakers to confirm the Edit produces audio. The Edit is the default `createSingleTrackEdit` — empty, no regions — so silence is the expected output regardless. The "RPC says it played" criterion was the explicit success bar for this session.
+- **No `TransportStateChanged` event.** UI is optimistic-only. If a second client (the future agent) toggles transport via the engine, this UI won't see it until either a hard refresh or until we plumb the event.
+- **`engine_get_transport_state` is added but never called from the UI.** I added the read RPC for completeness (the proto already declared it; the task scope explicitly listed it) but the UI's transport state slice initializes to `false` and updates only from clicks. The right next-bite use is calling `getTransportState()` once on mount in `useEngineSync` so the UI doesn't drift from engine state on app start — deferred since the engine boots stopped.
+- **No tests.** No engine-side test framework yet; UI is still embryonic per Phase 3.
+
+### Branch state
+
+- Branch: `claude/transport-play-stop` (was `claude/loving-lumiere-00c886` — renamed since the worktree HEAD matched main exactly).
+- Two commits on top of `16b46da` (the housekeeping log entry that's currently the tip of main).
+- Pushed to `origin` for review. **Not merged.** Sammy reviews via PR.
+
+### Followups (out of scope for this session, but obvious next bites)
+
+- **MCP agent gets `play`/`stop`/`get_transport_state` tools.** Currently the agent doesn't know these RPCs exist. Phase 4 will pick up the MCP scaffolding; transport is a good demo surface for "the agent runs the DAW."
+- **`TransportStateChanged` event + UI as mirror.** Wire when there's a second writer. Engine-side change is ~10 lines (emit on play/stop), UI change is ~5 lines (switch the store from optimistic to event-driven).
+- **`SubscribeTransportPosition` (or piggyback the position on `TransportStateChanged`).** Animate the BAR.BEAT.SUB readout — currently frozen at `12.3.1`.
+- **Initial `getTransportState()` call on app mount.** One line in `useEngineSync` to seed the store correctly if the engine is already playing when the UI connects.
+- **Record button.** Out of scope this session, but `Engine.Record(RecordRequest)` is the next obvious mutation. Tracktion's `transport.record(...)` is more involved (arm tracks, count-in, punch ranges); deserves its own session.
+
+### Time spent
+
+~45 minutes — under the 1-hour cap. The engine handler implementation was small (the existing `RenameTrack` / `SetTrackVolume` pattern transferred directly; the only research was the Tracktion `TransportControl::stop` signature taking 3 args, not 4 as written in the task). The biggest single time sink was the CMake configure cycle (~35s) for the worktree's first build, which is unavoidable. The pattern lesson from this session: a session where the proto contract already exists for the RPCs you're implementing collapses the design step to zero — read the existing handlers, match the pattern, build.
+
+---
+
 ## 2026-05-11 — Phase 4 v1: Python MCP agent exposing the 13 implemented engine RPCs ✅
 
 **Goal:** Stand up `agent/` — a Python MCP server that exposes the engine's currently-implemented RPCs as tools so Claude can drive the engine directly. The engine has been ready for this since 2026-05-06; the only blocker was scaffolding.

@@ -5,7 +5,7 @@
 use tauri::{Emitter, State};
 use tonic::Request;
 
-use crate::dto::{CommitDto, EventDto, ProjectDto, TrackDto};
+use crate::dto::{CommitDto, EventDto, ProjectDto, TrackDto, TransportStateDto};
 use crate::engine::{EngineClient, UNARY_RPC_TIMEOUT};
 use crate::proto;
 
@@ -123,6 +123,43 @@ pub async fn engine_undo(engine: State<'_, EngineClient>) -> Result<CommitDto, S
         .undo(unary(proto::UndoRequest::default()))
         .await
         .map_err(|e| format!("Undo: {e}"))?;
+    Ok(resp.into_inner().into())
+}
+
+// ---------------------------------------------------------------------------
+// Transport — Play/Stop mutations + state read. The UI updates optimistically
+// from the button onClick rather than waiting for an event, so the round-trip
+// here is just a fire-and-forget mutation as far as the user sees.
+// ---------------------------------------------------------------------------
+#[tauri::command]
+pub async fn engine_play(engine: State<'_, EngineClient>) -> Result<CommitDto, String> {
+    let mut client = engine.client().await?;
+    let resp = client
+        .play(unary(()))
+        .await
+        .map_err(|e| format!("Play: {e}"))?;
+    Ok(resp.into_inner().into())
+}
+
+#[tauri::command]
+pub async fn engine_stop(engine: State<'_, EngineClient>) -> Result<CommitDto, String> {
+    let mut client = engine.client().await?;
+    let resp = client
+        .stop(unary(()))
+        .await
+        .map_err(|e| format!("Stop: {e}"))?;
+    Ok(resp.into_inner().into())
+}
+
+#[tauri::command]
+pub async fn engine_get_transport_state(
+    engine: State<'_, EngineClient>,
+) -> Result<TransportStateDto, String> {
+    let mut client = engine.client().await?;
+    let resp = client
+        .get_transport_state(unary(()))
+        .await
+        .map_err(|e| format!("GetTransportState: {e}"))?;
     Ok(resp.into_inner().into())
 }
 

@@ -10,6 +10,15 @@ export function PlayIcon({ size = 18 }: { size?: number }) {
   );
 }
 
+export function PauseIcon({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="currentColor" aria-hidden>
+      <rect x="3" y="3" width="3.5" height="10" rx="1" />
+      <rect x="9.5" y="3" width="3.5" height="10" rx="1" />
+    </svg>
+  );
+}
+
 export function StopIcon({ size = 14 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 14 14" fill="currentColor" aria-hidden>

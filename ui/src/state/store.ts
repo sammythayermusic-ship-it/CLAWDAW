@@ -36,12 +36,18 @@ interface EngineStoreState {
   trackDetails: Record<string, TrackDto>;
   selectedTrackId: string | null;
   recentCommits: CommitDto[]; // newest first, capped
+  // Transport: updated optimistically from the TransportBar onClick. The
+  // engine doesn't emit TransportStateChanged events yet — when a second
+  // caller (e.g. the agent) can race with the UI we'll plumb the event
+  // and switch this to a mirror.
+  transport: { isPlaying: boolean };
 
   // Actions
   setConnection: (c: ConnectionState) => void;
   hydrateFromProject: (p: ProjectDto) => void;
   setSelectedTrack: (id: string | null) => void;
   setTrackDetails: (t: TrackDto) => void;
+  setTransportPlaying: (playing: boolean) => void;
   applyEvent: (e: EventDto) => void;
 }
 
@@ -73,8 +79,11 @@ export const useEngineStore = create<EngineStoreState>((set, get) => ({
   trackDetails: {},
   selectedTrackId: null,
   recentCommits: [],
+  transport: { isPlaying: false },
 
   setConnection: (c) => set({ connection: c }),
+
+  setTransportPlaying: (playing) => set({ transport: { isPlaying: playing } }),
 
   hydrateFromProject: (p) => {
     const byId: Record<string, TrackSummaryDto> = {};

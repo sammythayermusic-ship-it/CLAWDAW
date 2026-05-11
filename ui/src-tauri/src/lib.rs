@@ -22,6 +22,9 @@ pub fn run() {
             commands::set_track_pan,
             commands::set_plugin_parameter,
             commands::engine_undo,
+            commands::engine_play,
+            commands::engine_stop,
+            commands::engine_get_transport_state,
             commands::subscribe_events,
         ])
         .run(tauri::generate_context!())
