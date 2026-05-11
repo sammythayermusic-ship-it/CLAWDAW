@@ -15,7 +15,11 @@ use crate::proto;
 
 const ENGINE_ENDPOINT: &str = "http://127.0.0.1:50051";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
-const RPC_TIMEOUT: Duration = Duration::from_secs(8);
+/// Per-unary-RPC deadline. We DO NOT apply this at the channel level —
+/// `Endpoint::timeout` propagates to every call including server-streaming,
+/// which would cancel SubscribeEvents after 8s of idle. Instead we set this
+/// per-request on unary calls in commands.rs.
+pub const UNARY_RPC_TIMEOUT: Duration = Duration::from_secs(8);
 
 pub struct EngineClient {
     channel: Mutex<Option<Channel>>,
@@ -33,9 +37,7 @@ impl EngineClient {
         if let Some(ch) = guard.as_ref() {
             return Ok(ch.clone());
         }
-        let endpoint = Endpoint::from_static(ENGINE_ENDPOINT)
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(RPC_TIMEOUT);
+        let endpoint = Endpoint::from_static(ENGINE_ENDPOINT).connect_timeout(CONNECT_TIMEOUT);
         let ch = endpoint
             .connect()
             .await

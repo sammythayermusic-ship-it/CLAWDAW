@@ -6,8 +6,17 @@ use tauri::{Emitter, State};
 use tonic::Request;
 
 use crate::dto::{CommitDto, EventDto, ProjectDto, TrackDto};
-use crate::engine::EngineClient;
+use crate::engine::{EngineClient, UNARY_RPC_TIMEOUT};
 use crate::proto;
+
+/// Build a tonic Request with the unary-RPC deadline applied. We do this
+/// per-call instead of at the channel level so the streaming SubscribeEvents
+/// RPC isn't cancelled after the same timeout — see engine.rs.
+fn unary<T>(body: T) -> Request<T> {
+    let mut req = Request::new(body);
+    req.set_timeout(UNARY_RPC_TIMEOUT);
+    req
+}
 
 // ---------------------------------------------------------------------------
 // Reads
@@ -16,7 +25,7 @@ use crate::proto;
 pub async fn get_project(engine: State<'_, EngineClient>) -> Result<ProjectDto, String> {
     let mut client = engine.client().await?;
     let resp = client
-        .get_project(Request::new(()))
+        .get_project(unary(()))
         .await
         .map_err(|e| format!("GetProject: {e}"))?;
     Ok(resp.into_inner().into())
@@ -29,7 +38,7 @@ pub async fn get_track(
 ) -> Result<TrackDto, String> {
     let mut client = engine.client().await?;
     let resp = client
-        .get_track(Request::new(proto::GetTrackRequest { track_id }))
+        .get_track(unary(proto::GetTrackRequest { track_id }))
         .await
         .map_err(|e| format!("GetTrack: {e}"))?;
     Ok(resp.into_inner().into())
@@ -46,7 +55,7 @@ pub async fn rename_track(
 ) -> Result<CommitDto, String> {
     let mut client = engine.client().await?;
     let resp = client
-        .rename_track(Request::new(proto::RenameTrackRequest {
+        .rename_track(unary(proto::RenameTrackRequest {
             track_id,
             name: new_name,
         }))
@@ -63,7 +72,7 @@ pub async fn set_track_volume(
 ) -> Result<CommitDto, String> {
     let mut client = engine.client().await?;
     let resp = client
-        .set_track_volume(Request::new(proto::SetTrackVolumeRequest {
+        .set_track_volume(unary(proto::SetTrackVolumeRequest {
             track_id,
             volume_db,
         }))
@@ -80,7 +89,7 @@ pub async fn set_track_pan(
 ) -> Result<CommitDto, String> {
     let mut client = engine.client().await?;
     let resp = client
-        .set_track_pan(Request::new(proto::SetTrackPanRequest { track_id, pan }))
+        .set_track_pan(unary(proto::SetTrackPanRequest { track_id, pan }))
         .await
         .map_err(|e| format!("SetTrackPan: {e}"))?;
     Ok(resp.into_inner().into())
@@ -95,7 +104,7 @@ pub async fn set_plugin_parameter(
 ) -> Result<CommitDto, String> {
     let mut client = engine.client().await?;
     let resp = client
-        .set_plugin_parameter(Request::new(proto::SetPluginParameterRequest {
+        .set_plugin_parameter(unary(proto::SetPluginParameterRequest {
             plugin_instance_id,
             param_id,
             value: Some(proto::set_plugin_parameter_request::Value::Normalized(
@@ -111,7 +120,7 @@ pub async fn set_plugin_parameter(
 pub async fn engine_undo(engine: State<'_, EngineClient>) -> Result<CommitDto, String> {
     let mut client = engine.client().await?;
     let resp = client
-        .undo(Request::new(proto::UndoRequest::default()))
+        .undo(unary(proto::UndoRequest::default()))
         .await
         .map_err(|e| format!("Undo: {e}"))?;
     Ok(resp.into_inner().into())
@@ -128,6 +137,8 @@ pub async fn subscribe_events(
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     let mut client = engine.client().await?;
+    // No timeout on this Request — server-streaming RPCs would otherwise
+    // be cancelled by the per-RPC deadline. See engine.rs::UNARY_RPC_TIMEOUT.
     let stream = client
         .subscribe_events(Request::new(proto::EventFilter::default()))
         .await

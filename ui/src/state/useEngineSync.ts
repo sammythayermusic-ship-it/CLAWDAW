@@ -3,33 +3,62 @@
 // invalidates a track's detail (mixer change, plugin add/remove), the
 // reducer drops the cached detail and this hook re-fetches via GetTrack.
 //
-// Mount once at the App root. Re-mounting is harmless but we don't bother
-// guarding against StrictMode double-mounts beyond aborting the in-flight
-// connect — duplicate subscribers on the engine side just emit twice.
+// Auto-reconnect: if the stream errors out (engine restart, transient gRPC
+// failure, etc.), we schedule a retry with exponential backoff capped at
+// 30s. Mount once at the App root.
 
 import { useEffect } from "react";
 
 import { engineApi } from "./engine";
 import { useEngineStore } from "./store";
 
+const RETRY_BASE_MS = 1000;
+const RETRY_CAP_MS = 30_000;
+
 export function useEngineSync() {
   useEffect(() => {
     let cancelled = false;
-    const unlisteners: Array<() => void> = [];
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let attempt = 0;
+    let unlisteners: Array<() => void> = [];
+
+    function clearUnlisteners() {
+      for (const off of unlisteners) {
+        try {
+          off();
+        } catch {
+          // ignore — listener may already be torn down
+        }
+      }
+      unlisteners = [];
+    }
+
+    function scheduleRetry(reason: string) {
+      if (cancelled) return;
+      if (retryTimer) return; // already scheduled
+      const delay = Math.min(RETRY_BASE_MS * 2 ** attempt, RETRY_CAP_MS);
+      attempt += 1;
+      console.warn(`[engine] reconnect attempt ${attempt} in ${delay}ms (${reason})`);
+      retryTimer = setTimeout(() => {
+        retryTimer = null;
+        clearUnlisteners();
+        void connect();
+      }, delay);
+    }
 
     async function connect() {
+      if (cancelled) return;
       useEngineStore.getState().setConnection({ status: "connecting" });
       try {
         const project = await engineApi.getProject();
         if (cancelled) return;
-
+        attempt = 0; // success — reset backoff
         useEngineStore.getState().hydrateFromProject(project);
         useEngineStore.getState().setConnection({ status: "connected", sinceMs: Date.now() });
 
         // Wire event handler before starting the stream so we don't drop early events.
         const offEvent = await engineApi.onEvent((event) => {
           useEngineStore.getState().applyEvent(event);
-          // Re-fetch the affected track detail when its mirror was invalidated.
           if (event.kind === "trackMixerChanged") {
             void refetchTrack(event.trackId);
           } else if (
@@ -38,7 +67,8 @@ export function useEngineSync() {
             event.kind === "pluginParamChanged" ||
             event.kind === "pluginBypassed"
           ) {
-            const trackId = "trackId" in event ? event.trackId : useEngineStore.getState().selectedTrackId;
+            const trackId =
+              "trackId" in event ? event.trackId : useEngineStore.getState().selectedTrackId;
             if (trackId) void refetchTrack(trackId);
           } else if (event.kind === "trackAdded" || event.kind === "trackRemoved") {
             void refetchProject();
@@ -47,18 +77,20 @@ export function useEngineSync() {
         unlisteners.push(offEvent);
 
         const offDc = await engineApi.onDisconnected(() => {
+          if (cancelled) return;
           useEngineStore
             .getState()
             .setConnection({ status: "disconnected", reason: "stream ended" });
+          scheduleRetry("stream ended");
         });
         unlisteners.push(offDc);
 
         await engineApi.startEventStream();
       } catch (err) {
         if (cancelled) return;
-        useEngineStore
-          .getState()
-          .setConnection({ status: "disconnected", reason: String(err) });
+        const reason = String(err);
+        useEngineStore.getState().setConnection({ status: "disconnected", reason });
+        scheduleRetry(reason);
       }
     }
 
@@ -66,13 +98,11 @@ export function useEngineSync() {
 
     return () => {
       cancelled = true;
-      for (const off of unlisteners) {
-        try {
-          off();
-        } catch {
-          // ignore — listener may already be torn down
-        }
+      if (retryTimer) {
+        clearTimeout(retryTimer);
+        retryTimer = null;
       }
+      clearUnlisteners();
     };
   }, []);
 }
