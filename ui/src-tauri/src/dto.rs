@@ -75,6 +75,14 @@ pub struct CommitDto {
     pub description: String,
 }
 
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct TransportStateDto {
+    pub playing: bool,
+    pub recording: bool,
+    pub position_seconds: f64,
+}
+
 // ---------------------------------------------------------------------------
 // Events — tagged union, friendly for `switch (event.kind)` on the JS side.
 //   The wire shape is `{ kind, ...fields }`. We omit the `event_id` and
@@ -231,6 +239,16 @@ impl From<proto::MutationResult> for CommitDto {
         Self {
             commit_id: m.commit_id,
             description: m.description,
+        }
+    }
+}
+
+impl From<proto::TransportState> for TransportStateDto {
+    fn from(t: proto::TransportState) -> Self {
+        Self {
+            playing: t.playing,
+            recording: t.recording,
+            position_seconds: t.position.map(|p| p.seconds).unwrap_or(0.0),
         }
     }
 }

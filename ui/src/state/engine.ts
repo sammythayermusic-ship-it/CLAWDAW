@@ -5,7 +5,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-import type { CommitDto, EventDto, ProjectDto, TrackDto } from "./types";
+import type { CommitDto, EventDto, ProjectDto, TrackDto, TransportStateDto } from "./types";
 
 export const engineApi = {
   getProject: () => invoke<ProjectDto>("get_project"),
@@ -20,6 +20,10 @@ export const engineApi = {
   setPluginParameter: (pluginInstanceId: string, paramId: string, normalized: number) =>
     invoke<CommitDto>("set_plugin_parameter", { pluginInstanceId, paramId, normalized }),
   undo: () => invoke<CommitDto>("engine_undo"),
+
+  play: () => invoke<CommitDto>("engine_play"),
+  stop: () => invoke<CommitDto>("engine_stop"),
+  getTransportState: () => invoke<TransportStateDto>("engine_get_transport_state"),
 
   startEventStream: () => invoke<void>("subscribe_events"),
 

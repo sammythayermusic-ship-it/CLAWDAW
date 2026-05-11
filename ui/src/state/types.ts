@@ -70,6 +70,12 @@ export interface CommitDto {
   description: string;
 }
 
+export interface TransportStateDto {
+  playing: boolean;
+  recording: boolean;
+  positionSeconds: number;
+}
+
 // Tagged union — `kind` is the discriminant. Match those against the
 // rename_all = "camelCase" output of dto.rs::EventDto.
 export type EventDto =

@@ -77,6 +77,27 @@
     var(--elevation-hover);
 }
 
+/* Playing state: button reads as "lit" — gold face, intensified inner glow,
+   pause glyph swapped in by TransportBar.tsx. The accent fill ties the
+   active state into the rest of the design tokens without inventing a new
+   color. */
+.transport-btn--play-active {
+  background-color: var(--color-accent-active);
+  color: var(--color-text-primary);
+  box-shadow:
+    inset 0 0 24px rgb(from var(--color-accent-active) r g b / 0.95),
+    inset 0 1px 0 var(--glass-edge-highlight),
+    var(--elevation-hover);
+}
+
+.transport-btn--play-active:hover {
+  background-color: var(--color-accent-active);
+  box-shadow:
+    inset 0 0 28px rgb(from var(--color-accent-active) r g b / 1),
+    inset 0 1px 0 var(--glass-edge-highlight),
+    var(--elevation-hover);
+}
+
 .transport-btn--stop {
   border-radius: var(--radius-control);
 }
